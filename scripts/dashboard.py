@@ -135,8 +135,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             const div = document.getElementById('agent-report');
             if (r && r.content) {
                 div.style.display = 'block';
-                var txt = r.content || '';
-                txt = txt.split('\n').join('<br>');
+                var txt = (r.content || '').split(String.fromCharCode(10)).join('<br>');
                 div.innerHTML = '<strong>' + (r.title || node) + '</strong><br><br>' + txt + '<br><br><em>' + (r.updated || '') + '</em>';
             }
         }
@@ -228,6 +227,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             let agentHtml = '';
             if (data.agent_status) {
                 const reports = data.workflow_reports || {};
+                window._reports = reports;
                 for (const [node, status] of Object.entries(data.agent_status)) {
                     const icon = {research:'🔍',hypothesis:'💡',coding:'💻',backtest:'📊',adversarial:'🛡️',decision:'⚖️',paper_trade:'📈'}[node] || '✅';
                     const r = reports[node];
