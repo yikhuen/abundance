@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.whl
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+.env
+
+# Data (large files — stored as Parquet)
+data/
+*.parquet
+*.duckdb
+*.duckdb.wal
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Notebooks (keep outputs clean)
+.ipynb_checkpoints/
+
+# Secrets
+.env
+*.pem
+*.key
+
+# Poetry
+poetry.lock  # optional: commit if you want reproducible installs
