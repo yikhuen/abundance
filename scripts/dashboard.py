@@ -25,6 +25,10 @@ from fastapi.staticfiles import StaticFiles
 
 app = FastAPI(title="Abundance Dashboard")
 
+# In-memory PnL history for live chart (survives dashboard restart, not server restart)
+_pnl_history: list[dict] = []
+_MAX_PNL_HISTORY = 300
+
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -86,6 +90,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <div class="card">
             <h2>💰 Portfolio</h2>
             <div id="portfolio">Loading...</div>
+            <canvas id="pnlChart" width="700" height="180" style="width:100%;height:180px;margin-top:10px;border-radius:4px;background:#0d0d15;"></canvas>
         </div>
 
         <!-- Positions -->
@@ -140,6 +145,67 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 div.innerHTML = '<strong>' + (r.title || node) + '</strong><br><br>' + txt + '<br><br><em>' + (r.updated || '') + '</em>';
             }
         }
+        function drawPnlChart(history) {
+            const canvas = document.getElementById('pnlChart');
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            const W = canvas.width, H = canvas.height, pad = {top: 15, right: 15, bottom: 25, left: 55};
+            ctx.clearRect(0, 0, W, H);
+            if (!history || history.length < 2) return;
+
+            const equities = history.map(h => h.equity);
+            const minE = Math.min(...equities), maxE = Math.max(...equities);
+            const range = maxE - minE || 1;
+            const plotW = W - pad.left - pad.right;
+            const plotH = H - pad.top - pad.bottom;
+
+            const scaleX = (i) => pad.left + (i / (history.length - 1)) * plotW;
+            const scaleY = (v) => pad.top + plotH - ((v - minE) / range) * plotH;
+
+            // Grid lines
+            ctx.strokeStyle = '#1a1a2e';
+            ctx.lineWidth = 0.5;
+            for (let i = 0; i <= 4; i++) {
+                const y = pad.top + (i / 4) * plotH;
+                ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke();
+                const val = minE + (range * (4 - i) / 4);
+                ctx.fillStyle = '#888';
+                ctx.font = '9px monospace';
+                ctx.textAlign = 'right';
+                ctx.fillText('\$' + val.toFixed(0), pad.left - 4, y + 3);
+            }
+
+            // Area fill
+            ctx.beginPath();
+            ctx.moveTo(scaleX(0), scaleY(equities[0]));
+            for (let i = 1; i < equities.length; i++) ctx.lineTo(scaleX(i), scaleY(equities[i]));
+            ctx.lineTo(scaleX(equities.length - 1), pad.top + plotH);
+            ctx.lineTo(scaleX(0), pad.top + plotH);
+            ctx.closePath();
+            const grad = ctx.createLinearGradient(0, pad.top, 0, pad.top + plotH);
+            grad.addColorStop(0, equities[equities.length-1] >= equities[0] ? 'rgba(0,255,136,0.2)' : 'rgba(255,68,68,0.2)');
+            grad.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx.fillStyle = grad;
+            ctx.fill();
+
+            // Line
+            ctx.beginPath();
+            ctx.strokeStyle = equities[equities.length-1] >= equities[0] ? '#00ff88' : '#ff4444';
+            ctx.lineWidth = 1.5;
+            ctx.moveTo(scaleX(0), scaleY(equities[0]));
+            for (let i = 1; i < equities.length; i++) ctx.lineTo(scaleX(i), scaleY(equities[i]));
+            ctx.stroke();
+
+            // Time labels
+            ctx.fillStyle = '#555'; ctx.font = '8px monospace'; ctx.textAlign = 'center';
+            const step = Math.max(1, Math.floor(history.length / 5));
+            for (let i = 0; i < history.length; i += step) {
+                const t = new Date(history[i].ts);
+                const label = t.toLocaleTimeString('en-SG', {hour:'2-digit',minute:'2-digit'});
+                ctx.fillText(label, scaleX(i), H - 4);
+            }
+        }
+
         async function fetchData() {
             try {
                 const resp = await fetch('/api/status');
@@ -176,6 +242,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 portHtml += `<div class="metric"><span class="label">Drawdown</span><span class="value negative">${data.pnl.drawdown_pct?.toFixed(2) || '0'}%</span></div>`;
             }
             document.getElementById('portfolio').innerHTML = portHtml || 'No positions';
+            // Draw PnL chart
+            if (data.pnl_history && data.pnl_history.length > 1) drawPnlChart(data.pnl_history);
 
             // Positions
             let posHtml = '';
@@ -350,6 +418,20 @@ async def api_status():
             data["system"]["anomalies"] = state.get("anomaly_count", 0)
     except Exception:
         pass
+
+    # PnL history for live chart
+    try:
+        now = datetime.now(timezone.utc)
+        _pnl_history.append({
+            "ts": now.isoformat(),
+            "equity": data["pnl"].get("equity", 5000),
+            "upnl": data["pnl"].get("total_upnl", 0),
+        })
+        if len(_pnl_history) > _MAX_PNL_HISTORY:
+            _pnl_history[:] = _pnl_history[-_MAX_PNL_HISTORY:]
+        data["pnl_history"] = _pnl_history
+    except Exception:
+        data["pnl_history"] = []
 
     # Risk
     try:
