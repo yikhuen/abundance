@@ -324,8 +324,37 @@ def main():
         if not args.daemon:
             break
 
-        logger.info(f"\n💤 Sleeping {args.daemon_interval}s until next daemon cycle...\n")
-        time.sleep(args.daemon_interval)
+        # ── Daemon: monitor + sleep + repeat. Never exits. ──
+        crash_count = 0
+        
+        # Inter-cycle monitoring (price checks between research runs)
+        monitor_cycles = args.daemon_interval // args.monitor_interval
+        for mc in range(monitor_cycles):
+            try:
+                logger.info(f"[Monitor {mc+1}/{monitor_cycles}] Checking prices...")
+                from abundance.paper_trading.testnet_client import get_testnet_client
+                c = get_testnet_client()
+                btc = c.get_price("BTCUSDT")
+                
+                # Quick health checks
+                pos = c.get_positions()
+                total_upnl = sum(float(p.get("unRealizedProfit", 0)) for p in pos)
+                
+                # Check for anomalies
+                if abs(total_upnl) > 100:
+                    alerts.send("warning", f"Large uPnL: \${total_upnl:+,.2f}")
+                if len(pos) > 10:
+                    alerts.send("warning", f"High position count: {len(pos)}")
+                    
+            except Exception as e:
+                crash_count += 1
+                logger.error(f"Monitor error (crash #{crash_count}): {e}")
+                if crash_count > 5:
+                    alerts.send("critical", f"Too many crashes ({crash_count}) — pausing 10min")
+                    time.sleep(600)
+                    crash_count = 0
+            
+            time.sleep(args.monitor_interval)
 
     # Reset to idle
     for node in ["research", "hypothesis", "coding", "backtest", "adversarial", "decision", "paper_trade"]:
