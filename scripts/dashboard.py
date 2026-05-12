@@ -135,8 +135,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             const div = document.getElementById('agent-report');
             if (r && r.content) {
                 div.style.display = 'block';
-                div.innerHTML = '<strong>' + (r.title || node) + '</strong><br><br>' + r.content.replace(/
-/g,'<br>') + '<br><br><em>' + (r.updated || '') + '</em>';
+                var txt = r.content || '';
+                txt = txt.split('\n').join('<br>');
+                div.innerHTML = '<strong>' + (r.title || node) + '</strong><br><br>' + txt + '<br><br><em>' + (r.updated || '') + '</em>';
             }
         }
         async function fetchData() {
