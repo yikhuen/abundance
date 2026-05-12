@@ -194,8 +194,9 @@ def main():
     parser.add_argument("--iterations", type=int, default=3, help="Max iterations per run")
     parser.add_argument("--approval-timeout", type=float, default=1.0,
                         help="Hours to wait for human approval (0 = manual, >0 = auto-approve after timeout)")
-    parser.add_argument("--daemon", action="store_true", help="Run continuously")
-    parser.add_argument("--daemon-interval", type=int, default=86400, help="Seconds between daemon runs (default: 24h)")
+    parser.add_argument("--daemon", action="store_true", help="Run continuously (never exits)")
+    parser.add_argument("--daemon-interval", type=int, default=86400, help="Seconds between daemon cycles (default: 24h)")
+    parser.add_argument("--monitor-interval", type=int, default=1800, help="Seconds between monitor checks (default: 30min)")
     parser.add_argument("--query", default="profitable crypto trading strategies", help="Research seed query")
     args = parser.parse_args()
 
