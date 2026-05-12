@@ -129,6 +129,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         const REFRESH = {{ refresh_sec }};
         let countdown = REFRESH;
 
+        function showReport(node) {
+            const reports = window._reports || {};
+            const r = reports[node];
+            const div = document.getElementById('agent-report');
+            if (r && r.content) {
+                div.style.display = 'block';
+                div.innerHTML = '<strong>' + (r.title || node) + '</strong><br><br>' + r.content.replace(/
+/g,'<br>') + '<br><br><em>' + (r.updated || '') + '</em>';
+            }
+        }
         async function fetchData() {
             try {
                 const resp = await fetch('/api/status');
@@ -221,8 +231,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     const icon = {research:'🔍',hypothesis:'💡',coding:'💻',backtest:'📊',adversarial:'🛡️',decision:'⚖️',paper_trade:'📈'}[node] || '✅';
                     const r = reports[node];
                     const hasReport = r && r.title;
-                    const clickHandler = hasReport ? ` onclick="document.getElementById('agent-report').style.display='block'; document.getElementById('agent-report').innerHTML='<strong>${r.title||node}</strong><br><br>${(r.content||'').replace(/'/g,"\'").replace(/
-/g,'<br>')}<br><br><em>${r.updated||''}</em>';"` : '';
+                    const clickHandler = hasReport ? ` onclick="showReport('${node}')"` : '';
                     agentHtml += `<div class="metric" style="cursor:${hasReport?'pointer':'default'}"${clickHandler}><span class="label">${icon} ${node}${hasReport?' 📄':''}</span><span class="badge badge-${status === 'active' ? 'ok' : status === 'error' ? 'crit' : 'warn'}">${status.toUpperCase()}</span></div>`;
                 }
             }
