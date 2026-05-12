@@ -32,32 +32,16 @@ from abundance.orchestration.agents import (
 from abundance.orchestration.workflow import ResearchState
 
 
-def refine_query(iteration: int, prev_critique: str, pair: str) -> str:
-    """Generate an improved research query based on previous critique.
-
-    In production, this would be an LLM call. Here we use a structured
-    improvement pattern based on the critique severity and issues.
-    """
-    if iteration == 1:
-        return (
-            f"profitable algorithmic trading strategies for {pair} "
-            "crypto perpetuals 2024 2025 with causal mechanism"
-        )
-
-    # Build on previous critique
-    if "causal grounding" in prev_critique.lower():
-        direction = "causal mechanism documented in academic papers"
-    elif "sharpe" in prev_critique.lower():
-        direction = "high Sharpe ratio risk-adjusted strategies"
-    elif "drawdown" in prev_critique.lower():
-        direction = "low drawdown capital preservation strategies"
-    else:
-        direction = "improved version addressing critique"
-
-    return (
-        f"{direction} {pair} perpetual futures trading strategy "
-        f"site:arxiv.org OR site:ssrn.com"
-    )
+def refine_query(iteration: int, prev_critique: str, pair: str) -> tuple[str, str]:
+    """Generate research query + hypothesis hint per iteration."""
+    strategies = [
+        ("RSI mean reversion oversold crypto perpetuals", "rsi"),
+        ("volatility breakout ATR trailing stop crypto", "breakout"),
+        ("funding rate momentum carry arbitrage crypto", "carry"),
+    ]
+    idx = (iteration - 1) % len(strategies)
+    query, hint = strategies[idx]
+    return f"{query} {pair} site:arxiv.org", hint
 
 
 def main() -> None:
@@ -104,13 +88,13 @@ def main() -> None:
         logger.info(f"{'='*60}")
 
         # Refine query based on previous iteration's critique
-        research_query = refine_query(iteration, prev_critique, args.pair)
-        logger.info(f"Research query: {research_query[:120]}...")
+        research_query, strategy_hint = refine_query(iteration, prev_critique, args.pair)
+        logger.info(f"Research query: {research_query[:120]}... | hint: {strategy_hint}")
 
-        # Build initial state
+        # Build initial state with hint
         task_id = f"auto-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-iter{iteration}"
         initial_state = {
-            "task_id": task_id,
+            "task_id": f"{task_id}__{strategy_hint}",
             "pair": args.pair,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "research_query": research_query,

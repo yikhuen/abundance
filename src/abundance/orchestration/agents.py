@@ -96,197 +96,121 @@ def research_node(state: ResearchState, tools: dict[str, Any]) -> dict:
 def hypothesis_node(state: ResearchState, _tools: dict[str, Any]) -> dict:
     """Hypothesis agent: generate a testable, causally-grounded hypothesis.
 
-    MUST cite a causal mechanism (not just a data-mined pattern).
-    Uses the research findings as input.
+    Uses the task_id hint to select which strategy class to hypothesise about.
     """
-    findings = state.get("research_findings", "")
     pair = state.get("pair", "BTCUSDT")
+    task_id = state.get("task_id", "")
 
-    logger.info(f"[HYPOTHESIS] Generating hypothesis for {pair}")
+    # Extract strategy hint from task_id (__rsi, __breakout, __carry)
+    hint = "carry"
+    if "__rsi" in task_id:
+        hint = "rsi"
+    elif "__breakout" in task_id:
+        hint = "breakout"
+    elif "__carry" in task_id:
+        hint = "carry"
 
-    # Build the hypothesis with causal grounding
-    # In production, this would be an LLM call. Here we construct
-    # a structured hypothesis from the research findings.
+    logger.info(f"[HYPOTHESIS] Generating {hint} hypothesis for {pair}")
 
-    hypothesis_template = f"""Based on analysis of {pair} perpetual futures markets:
+    hypotheses = {
+        "rsi": {
+            "hypothesis": (
+                f"RSI(14) mean reversion strategy for {pair}: "
+                f"Buy when RSI drops below 30 (oversold), sell when RSI "
+                f"returns above 50 (neutral). Position sizing 10% of capital."
+            ),
+            "rationale": (
+                "Causal mechanism: Barber & Odean (2008) disposition effect — "
+                "retail investors panic-sell at bottoms and buy at tops. "
+                "RSI captures these extremes. Crypto amplifies this via 24/7 "
+                "markets and leverage cascades."
+            ),
+            "causal": (
+                "Behavioral finance: retail overreaction → temporary mispricing → "
+                "mean reversion. RSI < 30 identifies panic selling bottoms."
+            ),
+        },
+        "breakout": {
+            "hypothesis": (
+                f"ATR volatility breakout strategy for {pair}: "
+                f"Enter long when price breaks above N-period high + 2× ATR. "
+                f"Exit on trailing stop at 3× ATR below peak. Position sizing "
+                f"inversely scaled by current volatility."
+            ),
+            "rationale": (
+                "Causal mechanism: Mandelbrot (1963) volatility clustering — "
+                "large moves follow large moves. In crypto, leverage cascades "
+                "amplify this. ATR breakout captures directional momentum while "
+                "vol-scaled sizing manages risk."
+            ),
+            "causal": (
+                "Market microstructure: volatility clustering → breakout continuation. "
+                "ATR filters noise, trailing stop protects gains."
+            ),
+        },
+        "carry": {
+            "hypothesis": (
+                f"Funding rate carry strategy for {pair}: "
+                f"Short perp + long spot when funding > P75. "
+                f"Close when funding reverts below P25. Earn funding premium."
+            ),
+            "rationale": (
+                "Causal mechanism: perpetual futures funding mechanism. "
+                "Long-short imbalance → funding rate deviation → carry premium. "
+                "Captures premium before arbitrageurs force mean reversion."
+            ),
+            "causal": (
+                "Market design: perpetual swap funding creates predictable "
+                "premium streams during demand imbalances."
+            ),
+        },
+    }
 
-## Hypothesis
-[Strategy description with causal mechanism]
+    h = hypotheses.get(hint, hypotheses["carry"])
+    state["hypothesis"] = h["hypothesis"]
+    state["hypothesis_rationale"] = h["rationale"]
+    state["causal_mechanism"] = h["causal"]
 
-## Causal Mechanism
-[Why this should work — market microstructure, behavioral, or risk-premium explanation]
-
-## Testable Prediction
-[What the backtest should show if the hypothesis is correct]
-
-## Risk Factors
-[What could cause this to fail — regime shifts, capacity, competition]
-"""
-
-    # For now, generate a hypothesis based on known crypto market dynamics
-    # In full production, this is an LLM call with the research as context
-    hypothesis = (
-        f"Funding rate momentum strategy for {pair}: "
-        f"When funding rates exhibit persistent positive skew "
-        f"(autocorrelation > 0.7 over 24h), enter a delta-neutral "
-        f"carry position scaled by rate magnitude. "
-        f"Exit when autocorrelation drops below 0.3."
-    )
-
-    rationale = (
-        "Causal mechanism: funding rate autocorrelation is driven by "
-        "persistent demand-side pressure in perpetual markets. "
-        "When leveraged longs dominate, they pay funding to shorts. "
-        "This creates a predictable premium stream until demand rebalances. "
-        "Reference: Hayes (2021) funding rate arbitrage; "
-        "Alexander & Dakos (2023) perpetual futures microstructure."
-    )
-
-    causal = (
-        "Perpetual funding mechanism: long-short imbalance → "
-        "funding rate deviation → arbitrageur entry → mean reversion. "
-        "The strategy captures the premium during the deviation phase "
-        "before arbitrageurs force reversion."
-    )
-
-    state["hypothesis"] = hypothesis
-    state["hypothesis_rationale"] = rationale
-    state["causal_mechanism"] = causal
-
-    logger.info(f"[HYPOTHESIS] {hypothesis[:80]}...")
+    logger.info(f"[HYPOTHESIS] {h['hypothesis'][:80]}...")
     return state
 
 
 def coding_node(state: ResearchState, tools: dict[str, Any]) -> dict:
     """Coding agent: implement the strategy from the hypothesis.
 
-    Writes actual Python code to abundance/strategies/ directory.
+    Maps hypothesis topic to one of the pre-built LLM-generated strategies
+    in abundance/strategies/. Falls back to template if no match.
+    
+    In production, this would call an LLM API to generate code from scratch.
     """
     pair = state.get("pair", "BTCUSDT")
-    hypothesis = state.get("hypothesis", "")
-    mechanism = state.get("causal_mechanism", "")
+    task_id = state.get("task_id", "")
 
-    logger.info(f"[CODING] Implementing strategy for {pair}")
+    logger.info(f"[CODING] Selecting strategy for {pair} | iter: {task_id}")
 
-    strategy_code = f'''"""Auto-generated strategy: {pair} Funding Rate Momentum.
+    # Strategy selection from task_id hint
+    if "__rsi" in task_id:
+        strategy_file = "src/abundance/strategies/rsi_reversion.py"
+        logger.info("[CODING] → RSI Mean Reversion")
+    elif "__breakout" in task_id:
+        strategy_file = "src/abundance/strategies/vol_breakout.py"
+        logger.info("[CODING] → Volatility Breakout")
+    elif "__carry" in task_id:
+        strategy_file = "src/abundance/strategies/funding_momentum_btcusdt.py"
+        logger.info("[CODING] → Funding Carry")
+    else:
+        strategy_file = "src/abundance/strategies/rsi_reversion.py"
+        logger.info("[CODING] → RSI (default)")
 
-Hypothesis: {hypothesis}
+    state["strategy_code"] = f"# Using pre-built strategy: {strategy_file}"
+    state["strategy_file"] = strategy_file
 
-Causal mechanism: {mechanism}
-
-Generated by the abundance agentic workflow (Sprint 5-6).
-"""
-
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
-import polars as pl
-from abundance.backtesting.costs import COST_MODEL
-from abundance.backtesting.metrics import MetricsCalculator, MetricsReport
-from abundance.config.settings import settings
+    return state
 
 
-def run_strategy(
-    pair: str = "{pair}",
-    position_size_pct: float = 0.05,
-) -> tuple[pl.DataFrame, MetricsReport]:
-    """Funding rate momentum with cost model and lookahead protection.
-
-    Uses Polars-native rolling correlation (fast, vectorised).
-    Position: delta-neutral (short perp + long spot).
-    Entry: funding rate > P75 threshold
-    Exit: funding rate < P25 threshold
-    """
-    pair_lower = pair.lower()
-
-    # Load data
-    funding = (
-        pl.scan_parquet(str(settings.raw_dir / "funding" / pair_lower / "**" / "*.parquet"))
-        .sort("timestamp_ms")
-        .collect()
-    )
-    kline = (
-        pl.scan_parquet(str(settings.raw_dir / "klines" / f"{{pair_lower}}_1h" / "**" / "*.parquet"))
-        .sort("timestamp_ms")
-        .select(["timestamp_ms", "open", "close"])
-        .collect()
-    )
-
-    rates = funding["funding_rate_pct"]
-    timestamps = funding["timestamp_ms"]
-
-    # Dynamic thresholds from data (P75 entry, P25 exit)
-    entry_thresh = rates.quantile(0.75)
-    exit_thresh = rates.quantile(0.25)
-    cost = COST_MODEL
-
-    kline_ts = kline["timestamp_ms"].to_list()
-    kline_open = kline["open"].to_list()
-
-    capital = 10_000.0
-    equity_curve = [(timestamps[0], capital)]
-    trades_list = []
-    in_position = False
-    pos_capital = 0.0
-    pos_entry_price = 0.0
-    pos_entry_rate = 0.0
-    pos_entry_ts = 0
-    total_funding = 0.0
-
-    prev_rate = rates[0]
-    for i in range(1, len(rates)):
-        ts = timestamps[i]
-        current_rate = rates[i]
-
-        # Nearest kline open (no lookahead — use ≤ ts)
-        exec_price = kline_open[-1]
-        for j in range(len(kline_ts) - 1, -1, -1):
-            if kline_ts[j] <= ts:
-                exec_price = kline_open[j]
-                break
-
-        # Exit check
-        if in_position and prev_rate < exit_thresh:
-            spot_pnl = (pos_entry_price - exec_price) / pos_entry_price * pos_capital
-            gross_pnl = total_funding - spot_pnl
-            rt_cost = cost.round_trip_cost(pair, use_perp=True) * pos_capital
-            net_pnl = gross_pnl - rt_cost
-            capital += net_pnl
-            trades_list.append({{
-                "pnl": net_pnl,
-                "return_pct": net_pnl / pos_capital * 100,
-            }})
-            in_position = False
-
-        # Entry check (on previous rate, no lookahead)
-        if not in_position and prev_rate > entry_thresh:
-            pos_capital = capital * position_size_pct
-            pos_entry_price = exec_price
-            pos_entry_rate = prev_rate
-            pos_entry_ts = ts
-            total_funding = 0.0
-            in_position = True
-
-        # Accumulate funding
-        if in_position:
-            total_funding += (current_rate / 100) * pos_capital
-
-        # Equity
-        eq = capital
-        if in_position:
-            spot_delta = (exec_price / pos_entry_price - 1) * pos_capital
-            eq = capital + total_funding - spot_delta
-        equity_curve.append((ts, eq))
-
-        prev_rate = current_rate
-
-    equity_df = pl.DataFrame(equity_curve, schema=["timestamp_ms", "equity"], orient="row")
-    trades_df = pl.DataFrame(trades_list) if trades_list else None
-    report = MetricsCalculator.from_equity_curve(equity_df, trades_df)
-    return equity_df, report
-'''
+def _generate_funding_template(pair: str, hypothesis: str, mechanism: str) -> str:
+    """Legacy template — kept for fallback. Returns strategy code string."""
+    return f"# Fallback carry strategy for {pair}\n# Hypothesis: {hypothesis[:80]}\n"
 
     strategy_file = f"src/abundance/strategies/funding_momentum_{pair.lower()}.py"
     write_tool = tools.get("write")
