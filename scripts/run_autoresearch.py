@@ -35,6 +35,7 @@ from abundance.orchestration.workflow import ResearchState
 def refine_query(iteration: int, prev_critique: str, pair: str) -> tuple[str, str]:
     """Generate research query + hypothesis hint per iteration."""
     strategies = [
+        ("no-arbitrage perpetual futures pricing deviation He Manela Ross", "arbitrage"),
         ("RSI mean reversion oversold crypto perpetuals", "rsi"),
         ("volatility breakout ATR trailing stop crypto", "breakout"),
         ("funding rate momentum carry arbitrage crypto", "carry"),

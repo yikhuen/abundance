@@ -189,7 +189,10 @@ def coding_node(state: ResearchState, tools: dict[str, Any]) -> dict:
     logger.info(f"[CODING] Selecting strategy for {pair} | iter: {task_id}")
 
     # Strategy selection from task_id hint
-    if "__rsi" in task_id:
+    if "__arbitrage" in task_id:
+        strategy_file = "src/abundance/strategies/he_arbitrage.py"
+        logger.info("[CODING] → He et al. No-Arbitrage")
+    elif "__rsi" in task_id:
         strategy_file = "src/abundance/strategies/rsi_reversion.py"
         logger.info("[CODING] → RSI Mean Reversion")
     elif "__breakout" in task_id:

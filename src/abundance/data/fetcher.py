@@ -85,6 +85,10 @@ class DataFetcher(ABC):
             "taker_buy_quote_volume": "taker_buy_quote_volume",
         }
 
+        # Handle perp data having 'count' instead of 'trades'
+        if "count" in df.columns and "trades" not in df.columns:
+            df = df.rename({"count": "trades"})
+
         existing = [c for c in rename_map if c in df.columns]
         df = df.rename({c: rename_map[c] for c in existing})
 

@@ -204,16 +204,31 @@ class BinanceVisionFetcher(DataFetcher):
         with zipfile.ZipFile(BytesIO(response.content)) as zf:
             csv_name = zf.namelist()[0]
             with zf.open(csv_name) as f:
-                df = pl.read_csv(
-                    f.read(),
-                    has_header=False,
-                    new_columns=self.KLINE_COLUMNS,
-                    schema_overrides={
-                        "open_time": pl.Int64,
-                        "close_time": pl.Int64,
-                        "ignore": pl.Float64,
-                    },
-                )
+                # Futures data has headers; spot data doesn't
+                has_header = "futures" in self.market_type
+                if has_header:
+                    df = pl.read_csv(
+                        f.read(),
+                        has_header=True,
+                        schema_overrides={
+                            "open_time": pl.Int64,
+                            "close_time": pl.Int64,
+                            "ignore": pl.Float64,
+                        },
+                    )
+                    # Rename to our standard columns
+                    df = df.rename({c: c for c in df.columns})  # keep as-is
+                else:
+                    df = pl.read_csv(
+                        f.read(),
+                        has_header=False,
+                        new_columns=self.KLINE_COLUMNS,
+                        schema_overrides={
+                            "open_time": pl.Int64,
+                            "close_time": pl.Int64,
+                            "ignore": pl.Float64,
+                        },
+                    )
 
         # Drop unused 'ignore' column to prevent schema conflicts across months
         if "ignore" in df.columns:
