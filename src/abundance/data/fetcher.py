@@ -31,6 +31,10 @@ class DataFetcher(ABC):
         """
         ...
 
+    def _get_output_path(self) -> Path:
+        """Return the output directory for this fetcher's data."""
+        return self.output_dir / self.symbol.lower()
+
     def save_parquet(self, df: pl.DataFrame, partition_cols: list[str] | None = None) -> Path:
         """Persist DataFrame to partitioned Parquet files.
 
@@ -41,7 +45,7 @@ class DataFetcher(ABC):
         Returns:
             Path to the saved Parquet directory.
         """
-        output_path = self.output_dir / self.symbol.lower()
+        output_path = self._get_output_path()
         output_path.mkdir(parents=True, exist_ok=True)
         df.write_parquet(
             output_path,

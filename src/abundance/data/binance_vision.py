@@ -68,6 +68,10 @@ class BinanceVisionFetcher(DataFetcher):
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": "abundance/0.1.0"})
 
+    def _get_output_path(self) -> Path:
+        """Include interval in output path to avoid collisions."""
+        return self.output_dir / f"{self.symbol.lower()}_{self.interval}"
+
     # ── Public API ──────────────────────────────────────────────────
 
     def fetch_monthly(
