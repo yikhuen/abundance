@@ -146,6 +146,9 @@ def wait_for_approval(result: dict, timeout_hours: int, alerts: AlertDispatcher)
     """Wait for human approval with timeout.
 
     Returns 'approved', 'rejected', or 'auto_approved'.
+
+    KEY RULE: If the strategy voted 'reject', timeout defaults to REJECT.
+    Auto-approve only fires if the strategy itself voted 'approve'.
     """
     decision = result.get("decision", "reject")
     summary = (
@@ -160,32 +163,29 @@ def wait_for_approval(result: dict, timeout_hours: int, alerts: AlertDispatcher)
         f"━━━━━━━━━━━━━━━━━━━━━\n"
     )
 
-    # Send alert
     alerts.send("warning", f"DECISION REQUIRED ({timeout_hours}h timeout):\n{summary}")
 
     if timeout_hours == 0:
-        # Manual approval required
         logger.info("⏸️  Awaiting human approval (no timeout)")
         logger.info(summary)
         logger.info("Reply 'approve', 'reject', or 'revise' to continue")
         return "awaiting"
 
+    # CRITICAL: only auto-approve if the model itself voted approve
     if decision == "approve":
-        # Auto-approve immediately if model says approve
-        alerts.send("info", f"✅ AUTO-APPROVED: {result.get('decision_rationale', '')}")
-        update_workflow_status("decision", "auto_approved", result.get("decision_rationale", ""))
+        alerts.send("info", f"✅ AUTO-APPROVED (model confidence): {result.get('decision_rationale', '')}")
+        update_workflow_status("decision", "auto_approved")
         return "auto_approved"
-
-    # Model wasn't sure — wait for timeout, then auto-approve with conservative sizing
-    logger.info(f"⏳ Auto-approval pending — {timeout_hours}h timeout")
-    logger.info(summary)
-    logger.info("(Will auto-approve at reduced size if no response)")
-
-    # In production: sleep timeout_hours, check for reply
-    # For now: simulate timeout
-    alerts.send("info", f"⏳ No response within {timeout_hours}h — auto-approving at 50% size")
-    update_workflow_status("decision", "timeout_approved", "No human response within timeout")
-    return "auto_approved"
+    elif decision == "reject":
+        # Model said reject → respect that. No auto-approval.
+        alerts.send("info", f"❌ AUTO-REJECTED: Strategy's own verdict was REJECT — skipping deployment")
+        update_workflow_status("decision", "rejected", result.get("decision_rationale", ""))
+        return "rejected"
+    else:
+        # revise — not deployable without human input
+        alerts.send("info", f"🔄 Strategy needs revision — skipping deployment")
+        update_workflow_status("decision", "needs_revision")
+        return "rejected"
 
 
 def main():
@@ -228,6 +228,47 @@ def main():
                 logger.error(f"Iteration {iteration} failed: {result.get('error')}")
                 continue
 
+            # ── Generative-Adversarial Refinement Loop ──────
+            # Refine strategy if adversarial critique finds issues
+            refine_count = 0
+            MAX_REFINEMENTS = 2
+            while refine_count < MAX_REFINEMENTS:
+                severity = result.get("severity", "low")
+                issues = result.get("issues_found", [])
+                sharpe = result.get("backtest_results", {}).get("sharpe", -999)
+
+                # Check if refinement is needed
+                needs_refinement = (
+                    severity in ("high", "critical")
+                    or (isinstance(sharpe, (int, float)) and sharpe < 0)
+                    or len(issues) > 2
+                )
+
+                if not needs_refinement:
+                    logger.info(f"  ✅ Strategy passes adversarial review (severity: {severity}, issues: {len(issues)})")
+                    break
+
+                refine_count += 1
+                logger.info(f"  🔄 Refinement {refine_count}/{MAX_REFINEMENTS} — addressing: {', '.join(issues[:2])}")
+                update_workflow_status("adversarial", f"refining_{refine_count}")
+
+                # Refine: re-run coding with critique as feedback
+                refined = run_iteration(
+                    args.pair,
+                    f"refine strategy addressing: {'; '.join(issues[:2])}",
+                    iteration,
+                    previous_critique="\n".join(issues),
+                )
+                if refined["status"] == "ok":
+                    result = refined
+                    logger.info(f"  Refined: Sharpe {result.get('backtest_results', {}).get('sharpe', '?')}, severity {result.get('severity', '?')}")
+                else:
+                    logger.warning(f"  Refinement failed — keeping previous version")
+                    break
+
+            if refine_count >= MAX_REFINEMENTS:
+                logger.warning(f"  Max refinements ({MAX_REFINEMENTS}) reached — proceeding with current version")
+
             previous_critique = result.get("critique", "")
 
             # Track best
@@ -258,6 +299,11 @@ def main():
 
                 update_workflow_status("paper_trade", "deployed")
                 break  # Exit iteration loop after successful deployment
+
+            elif approval == "rejected":
+                logger.info(f"Strategy rejected — continuing to next iteration")
+                update_workflow_status("decision", "rejected")
+                continue
 
             elif approval == "awaiting":
                 logger.info("Awaiting human response — pausing agent")
