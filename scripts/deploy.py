@@ -23,6 +23,7 @@ load_dotenv()
 from loguru import logger
 
 from abundance.deployment.bridge import OrderManager, SignalComputer
+from abundance.deployment.monitoring import AlertDispatcher, DrawdownTracker, TradeLogEntry, TradeLogger
 from abundance.deployment.risk import RiskLimits, RiskManager
 from abundance.paper_trading.testnet_client import get_testnet_client
 
@@ -85,6 +86,12 @@ def main() -> None:
         ),
         initial_equity=args.capital,
     )
+
+    # Initialise monitoring
+    trade_logger = TradeLogger()
+    alerts = AlertDispatcher()
+    dd_tracker = DrawdownTracker()
+    dd_tracker.peak = args.capital
 
     # Compute signals
     computer = SignalComputer(client)
