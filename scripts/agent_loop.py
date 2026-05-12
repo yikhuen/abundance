@@ -218,9 +218,14 @@ def main():
 
     while True:
         previous_critique = ""
+        any_approved = False
+        all_results = []
+        
+        # Phase 1: Test raw ideas from search
+        raw_ideas_count = 0
         for iteration in range(1, args.iterations + 1):
             logger.info(f"\n{'='*50}")
-            logger.info(f"Iteration {iteration}/{args.iterations}")
+            logger.info(f"[Phase 1: Raw Ideas] Iteration {iteration}/{args.iterations}")
             logger.info(f"{'='*50}")
 
             result = run_iteration(args.pair, args.query, iteration, previous_critique)
@@ -228,6 +233,8 @@ def main():
             if result["status"] != "ok":
                 logger.error(f"Iteration {iteration} failed: {result.get('error')}")
                 continue
+
+            all_results.append(result)
 
             # ── Generative-Adversarial Refinement Loop ──────
             # Refine strategy if adversarial critique finds issues
@@ -311,6 +318,51 @@ def main():
                 # In production: sleep and poll for response
                 # For now: break out
                 break
+
+        # Phase 2: If no raw ideas succeeded, load dreams and test them
+        any_approved = any(r.get("status") == "approved" for r in all_results)
+        # Actually track: did any iteration get approved?
+        any_approved = False  # will be set during iterations
+        
+        if not any_approved and previous_critique:
+            logger.info(f"\n{'='*50}")
+            logger.info(f"[Phase 2: Dream Testing] All raw ideas rejected — testing dreams")
+            logger.info(f"{'='*50}")
+            
+            # Load dreams from research agent
+            dreams_path = Path("data/processed/dreams.json")
+            if dreams_path.exists():
+                dreams = json.loads(dreams_path.read_text())
+                logger.info(f"  {len(dreams)} dreams to test")
+                
+                for di, dream in enumerate(dreams[:3]):  # test top 3 dreams
+                    dream_type = dream.get("type", "unknown")
+                    dream_desc = dream.get("dream", "")[:100]
+                    logger.info(f"  Dream {di+1}: [{dream_type}] {dream_desc}")
+                    
+                    # Parameter tuning dreams
+                    if dream_type == "parameter_tuning":
+                        strategy_name = dream.get("strategy", "")
+                        params = dream.get("current_params", {})
+                        # Test with wider parameter ranges
+                        logger.info(f"    Tuning {strategy_name}: {list(params.keys())[:3]}")
+                        # (In production: run parameter sweep here)
+                    
+                    # Composition dreams
+                    elif dream_type == "composition":
+                        ingredients = dream.get("ingredients", [])
+                        logger.info(f"    Composing: {', '.join(ingredients)}")
+                        # (In production: build composite strategy here)
+            else:
+                logger.info("  No dreams file found — running research agent to generate")
+                try:
+                    import subprocess
+                    subprocess.run(
+                        ["poetry", "run", "python", "scripts/research_agent.py"],
+                        cwd="/home/yikhuen/abundance", capture_output=True, timeout=30
+                    )
+                except Exception as e:
+                    logger.warning(f"Research agent failed: {e}")
 
         # ── End of run summary ──────────────────────────────
         if best_result:
