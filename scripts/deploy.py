@@ -23,6 +23,7 @@ load_dotenv()
 from loguru import logger
 
 from abundance.deployment.bridge import OrderManager, SignalComputer
+from abundance.deployment.risk import RiskLimits, RiskManager
 from abundance.paper_trading.testnet_client import get_testnet_client
 
 
@@ -73,6 +74,18 @@ def main() -> None:
     else:
         pairs = [args.pair]
 
+    # Initialise risk manager
+    risk_mgr = RiskManager(
+        limits=RiskLimits(
+            max_position_pct=0.10,
+            max_drawdown_pct=0.20,
+            max_daily_loss_pct=0.05,
+            cooldown_hours=24,
+            leverage_cap=2.0,
+        ),
+        initial_equity=args.capital,
+    )
+
     # Compute signals
     computer = SignalComputer(client)
     order_mgr = OrderManager(client)
@@ -102,6 +115,22 @@ def main() -> None:
 
         # Compute delta orders
         orders = order_mgr.compute_delta_orders(signals, args.capital)
+
+        # Apply risk validation to each order
+        long_count = sum(1 for s in signals if s.direction == "long")
+        validated_orders = []
+        for o in orders:
+            notional = o.quantity * next((s.price for s in signals if s.pair == o.pair), 0)
+            approved, adjusted, reason = risk_mgr.validate_position(
+                o.pair, notional, args.capital, long_count
+            )
+            if approved:
+                if adjusted != notional:
+                    o.quantity = adjusted / (notional / o.quantity) if notional > 0 else o.quantity
+                validated_orders.append(o)
+            else:
+                logger.warning(f"  ⚠️  {o.pair} rejected: {reason}")
+        orders = validated_orders
         
         if not orders:
             logger.info("No orders needed — positions already aligned")
@@ -137,8 +166,15 @@ def main() -> None:
         logger.info(f"\nSleeping {args.interval}s until next signal...\n")
         time.sleep(args.interval)
 
+    # Risk report
+    risk_report = risk_mgr.get_risk_report(args.capital)
+    logger.info(f"\nRisk Status:")
+    logger.info(f"  Drawdown: {risk_report['drawdown_pct']}% | Daily PnL: {risk_report['daily_pnl_pct']:+.2f}%")
+    if risk_report["halted"]:
+        logger.error(f"  HALTED: {risk_report['halt_reason']}")
+
     logger.info("=" * 60)
-    logger.info("Sprint 9 — Execution Bridge COMPLETE")
+    logger.info("Sprints 9+10 — Execution Bridge + Risk Management COMPLETE")
     logger.info("=" * 60)
 
 
