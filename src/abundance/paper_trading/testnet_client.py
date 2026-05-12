@@ -123,11 +123,17 @@ class TestnetClient:
 
         WARNING: This executes on TESTNET only. No real money.
         """
+        # Round to proper precision (3dp for BTC, 0dp for most alts)
+        if quantity < 0.0001:
+            logger.warning(f"Quantity too small: {quantity} — skipping")
+            return {"status": "skipped", "reason": "quantity too small"}
+        qty_str = f"{quantity:.3f}" if quantity >= 0.001 else f"{quantity:.4f}"
+        
         params = {
             "symbol": symbol,
             "side": side.upper(),
             "type": "MARKET",
-            "quantity": str(quantity),
+            "quantity": qty_str,
             "reduceOnly": "true" if reduce_only else "false",
         }
         result = self._request("POST", "/fapi/v1/order", params)
