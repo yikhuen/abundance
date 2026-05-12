@@ -24,6 +24,9 @@ tenacity = ">=8.0"
 nautilus-trader = { version = ">=1.200,<2.0", python = ">=3.12,<3.15", optional = false }
 langgraph = "^1.2.0"
 langgraph-checkpoint-postgres = "^3.1.0"
+fastapi = "^0.136.1"
+uvicorn = "^0.46.0"
+jinja2 = "^3.1.6"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.0"
