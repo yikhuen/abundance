@@ -140,34 +140,69 @@ If you encounter a limitation you cannot fix with existing tools, write a **tool
 
 ## Research Protocol
 
-### Breadth-First Search (Always)
+### Rule Zero: Search Before You Build
 
-1. **Search** web for papers published 2024+ on arXiv, SSRN
-2. **Filter** by data availability — can we test this with our 145 pairs?
-3. **Rank** by reported Sharpe, recency, institutional source
-4. **Test** the top 3 candidates
-5. **Never** start by coding a strategy from memory
+**Never** start by coding a strategy from memory. Always search first.
 
-### Query Rotation
+### Wide Search (Every Cycle)
 
-Cycle through strategy classes to avoid getting stuck:
-
-```
-Week 1: momentum / trend-following
-Week 2: mean reversion / statistical arbitrage
-Week 3: funding / carry / basis
-Week 4: volatility / options-like / regime-switching
+```bash
+python scripts/research_agent.py
 ```
 
-### Paper Ranking Criteria
+This runs 5 queries across 12 rotating templates, generating:
+- Paper findings from arXiv, SSRN, institutional sources
+- Connections to existing strategies in the registry
+- Class-level insights about what works and why
+- Dreams: novel compositions, parameter sweeps, class variants
 
-| Criterion | Weight | Why |
-|---|---|---|
-| Sharpe > 1.5 reported | High | Indicates real alpha, not noise |
-| Published 2025+ | High | Older strategies may have decayed |
-| Institutional author | Medium | Jane Street, Two Sigma, etc. |
-| Open-source code | Medium | Faster to validate |
-| Uses data we have | Critical | If we can't test it, skip it |
+Dreams are saved to `data/processed/dreams.json`. Act on the best ones.
+
+### Query Rotation (12-week cycle)
+
+```
+Week  1-2: momentum / trend-following / cross-sectional
+Week  3-4: mean reversion / statistical arbitrage / pairs
+Week  5-6: funding / carry / basis / arbitrage
+Week  7-8: volatility / regime-switching / adaptive
+Week  9-10: deep learning / RL / transformer
+Week 11-12: institutional / novel / conference papers
+```
+
+### Dream → Build → Validate → Deploy
+
+When the research agent generates a dream:
+1. Check if it's novel (not already in registry)
+2. Build the strategy (generate code)
+3. Backtest with full cost model + walk-forward
+4. If Sharpe > 0 on test set → register, deploy
+5. If Sharpe < 0 → log, archive, learn
+
+### Strategy Registry
+
+All strategies live in `src/abundance/strategies/` by class:
+
+```
+strategies/
+  momentum/       trend-following, cross-sectional, breakout
+  mean_reversion/ RSI, bollinger, stat-arb, pairs
+  carry/          funding, basis, arbitrage
+  volatility/     vol-targeting, grid, options-like
+  composite/      blended, ensemble, meta-strategies
+  ml_based/       learned parameters, NN-based
+  archived/       rejected, deprecated, failed
+```
+
+**Never overwrite.** Registry auto-archives old versions.
+
+### Connection-Drawing
+
+After every research cycle, ask:
+- Does this paper's idea complement an existing strategy?
+- Does it work in regimes where we're weak?
+- Can two successful strategies from different classes be composed?
+
+The research agent does this automatically via `find_connections()`.
 
 ## The Learning Loop
 
