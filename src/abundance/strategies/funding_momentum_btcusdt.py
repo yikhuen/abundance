@@ -13,111 +13,106 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import polars as pl
-from loguru import logger
-
+from abundance.backtesting.costs import COST_MODEL
 from abundance.backtesting.metrics import MetricsCalculator, MetricsReport
 from abundance.config.settings import settings
 
 
 def run_strategy(
     pair: str = "BTCUSDT",
-    entry_autocorr: float = 0.7,
-    exit_autocorr: float = 0.3,
-    lookback_periods: int = 72,  # 72 × 8h = 24 days of 8h funding
-    position_size_pct: float = 0.02,
+    position_size_pct: float = 0.05,
 ) -> tuple[pl.DataFrame, MetricsReport]:
-    """Funding rate momentum strategy.
+    """Funding rate momentum with cost model and lookahead protection.
 
-    Entry: funding rate autocorrelation > entry_autocorr over lookback window
-    Exit: autocorrelation drops below exit_autocorr
-    Position: delta-neutral (short perp + long spot), scaled by rate magnitude.
+    Uses Polars-native rolling correlation (fast, vectorised).
+    Position: delta-neutral (short perp + long spot).
+    Entry: funding rate > P75 threshold
+    Exit: funding rate < P25 threshold
     """
     pair_lower = pair.lower()
 
-    # Load funding rate data
-    funding_path = settings.raw_dir / "funding" / pair_lower
+    # Load data
     funding = (
-        pl.scan_parquet(str(funding_path / "**" / "*.parquet"))
+        pl.scan_parquet(str(settings.raw_dir / "funding" / pair_lower / "**" / "*.parquet"))
         .sort("timestamp_ms")
         .collect()
     )
-
-    # Load 1h kline data for spot hedge tracking
-    kline_path = settings.raw_dir / "klines" / f"{pair_lower}_1h"
     kline = (
-        pl.scan_parquet(str(kline_path / "**" / "*.parquet"))
+        pl.scan_parquet(str(settings.raw_dir / "klines" / f"{pair_lower}_1h" / "**" / "*.parquet"))
         .sort("timestamp_ms")
+        .select(["timestamp_ms", "open", "close"])
         .collect()
     )
 
-    rates = funding["funding_rate_pct"].to_list()
-    timestamps = funding["timestamp_ms"].to_list()
+    rates = funding["funding_rate_pct"]
+    timestamps = funding["timestamp_ms"]
 
-    initial_capital = 10_000.0
-    capital = initial_capital
-    equity_curve: list[tuple[int, float]] = []
-    trades: list[dict] = []
+    # Dynamic thresholds from data (P75 entry, P25 exit)
+    entry_thresh = rates.quantile(0.75)
+    exit_thresh = rates.quantile(0.25)
+    cost = COST_MODEL
+
+    kline_ts = kline["timestamp_ms"].to_list()
+    kline_open = kline["open"].to_list()
+
+    capital = 10_000.0
+    equity_curve = [(timestamps[0], capital)]
+    trades_list = []
     in_position = False
-    position_capital = 0.0
-    entry_price = 0.0
-    accumulated_funding = 0.0
+    pos_capital = 0.0
+    pos_entry_price = 0.0
+    pos_entry_rate = 0.0
+    pos_entry_ts = 0
+    total_funding = 0.0
 
-    for i in range(lookback_periods, len(rates)):
-        # Compute rolling autocorrelation
-        window = rates[i - lookback_periods : i + 1]
-        if len(window) < 2:
-            continue
-
-        mean = sum(window) / len(window)
-        var = sum((x - mean) ** 2 for x in window) / len(window)
-        if var == 0:
-            continue
-
-        lagged = window[:-1]
-        current = window[1:]
-        lagged_mean = sum(lagged) / len(lagged)
-        current_mean = sum(current) / len(current)
-        cov = sum(
-            (lagged[j] - lagged_mean) * (current[j] - current_mean)
-            for j in range(len(lagged))
-        ) / len(lagged)
-        autocorr = cov / var
-
-        rate = rates[i]
+    prev_rate = rates[0]
+    for i in range(1, len(rates)):
         ts = timestamps[i]
+        current_rate = rates[i]
 
-        # Get spot price (approximate: closest kline)
-        spot_price = kline.filter(
-            pl.col("timestamp_ms") <= ts
-        )["close"].last()
+        # Nearest kline open (no lookahead — use ≤ ts)
+        exec_price = kline_open[-1]
+        for j in range(len(kline_ts) - 1, -1, -1):
+            if kline_ts[j] <= ts:
+                exec_price = kline_open[j]
+                break
 
-        # ── Entry ────────────────────────────────────
-        if not in_position and autocorr > entry_autocorr:
-            position_capital = capital * position_size_pct * abs(rate / 0.01)
-            entry_price = spot_price
-            accumulated_funding = 0.0
-            in_position = True
-            continue
-
-        # ── Accumulate funding ───────────────────────
-        if in_position:
-            accumulated_funding += (rate / 100) * position_capital
-
-        # ── Exit ─────────────────────────────────────
-        if in_position and autocorr < exit_autocorr:
-            spot_pnl = (entry_price - spot_price) / entry_price * position_capital
-            total_pnl = accumulated_funding - spot_pnl
-            capital += total_pnl
-            trades.append({"pnl": total_pnl, "return_pct": total_pnl / position_capital * 100})
+        # Exit check
+        if in_position and prev_rate < exit_thresh:
+            spot_pnl = (pos_entry_price - exec_price) / pos_entry_price * pos_capital
+            gross_pnl = total_funding - spot_pnl
+            rt_cost = cost.round_trip_cost(pair, use_perp=True) * pos_capital
+            net_pnl = gross_pnl - rt_cost
+            capital += net_pnl
+            trades_list.append({
+                "pnl": net_pnl,
+                "return_pct": net_pnl / pos_capital * 100,
+            })
             in_position = False
 
-        # Record equity
-        equity_value = capital
+        # Entry check (on previous rate, no lookahead)
+        if not in_position and prev_rate > entry_thresh:
+            pos_capital = capital * position_size_pct
+            pos_entry_price = exec_price
+            pos_entry_rate = prev_rate
+            pos_entry_ts = ts
+            total_funding = 0.0
+            in_position = True
+
+        # Accumulate funding
         if in_position:
-            equity_value = capital + accumulated_funding - (entry_price - spot_price) / entry_price * position_capital
-        equity_curve.append((ts, equity_value))
+            total_funding += (current_rate / 100) * pos_capital
+
+        # Equity
+        eq = capital
+        if in_position:
+            spot_delta = (exec_price / pos_entry_price - 1) * pos_capital
+            eq = capital + total_funding - spot_delta
+        equity_curve.append((ts, eq))
+
+        prev_rate = current_rate
 
     equity_df = pl.DataFrame(equity_curve, schema=["timestamp_ms", "equity"], orient="row")
-    trades_df = pl.DataFrame(trades) if trades else None
+    trades_df = pl.DataFrame(trades_list) if trades_list else None
     report = MetricsCalculator.from_equity_curve(equity_df, trades_df)
     return equity_df, report
