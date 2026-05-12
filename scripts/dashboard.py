@@ -27,6 +27,8 @@ app = FastAPI(title="Abundance Dashboard")
 
 # In-memory PnL history for live chart (survives dashboard restart, not server restart)
 _pnl_history: list[dict] = []
+# Singleton RiskManager so drawdown/peak tracking persists across API calls
+_risk_manager = None
 _MAX_PNL_HISTORY = 300
 
 HTML_TEMPLATE = """<!DOCTYPE html>
@@ -433,16 +435,17 @@ async def api_status():
     except Exception:
         data["pnl_history"] = []
 
-    # Risk
+    # Risk — live from RiskManager (module-level singleton so state persists)
     try:
-        data["risk"] = {
-            "drawdown_pct": 0.0,
-            "daily_pnl_pct": 0.0,
-            "halted": False,
-            "halt_reason": "",
-        }
+        from abundance.deployment.risk import RiskManager
+        global _risk_manager
+        if _risk_manager is None:
+            _risk_manager = RiskManager(initial_equity=5000.0)
+        if data["pnl"].get("equity"):
+            _risk_manager.update_equity(data["pnl"]["equity"])
+        data["risk"] = _risk_manager.get_risk_report(data["pnl"].get("equity", 5000))
     except Exception:
-        pass
+        data["risk"] = {"drawdown_pct": 0.0, "daily_pnl_pct": 0.0, "halted": False, "halt_reason": ""}
 
     # Pairs
     try:
