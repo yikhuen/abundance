@@ -114,8 +114,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         <!-- Agent Status -->
         <div class="card">
-            <h2>🤖 Agent Pipeline</h2>
+            <h2>🤖 Agent Pipeline (click stages for reports)</h2>
             <div id="agents">Loading...</div>
+            <div id="agent-report" style="display:none;margin-top:10px;padding:10px;background:#0d0d15;border-radius:4px;font-size:12px;max-height:300px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;"></div>
         </div>
 
         <!-- System Health -->
