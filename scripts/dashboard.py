@@ -170,8 +170,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             let posHtml = '';
             if (data.positions && data.positions.length > 0) {
                 for (const p of data.positions) {
-                    const cls = parseFloat(p.upnl) >= 0 ? 'positive' : 'negative';
-                    posHtml += `<div class="metric"><span class="label">${p.symbol}</span><span class="value">${p.size} @ \$${parseFloat(p.entry).toLocaleString()} <span class="${cls}">\$${parseFloat(p.upnl).toFixed(2)}</span></span></div>`;
+                    const cls = parseFloat(p.unRealizedProfit) >= 0 ? 'positive' : 'negative';
+                    posHtml += `<div class="metric"><span class="label">${p.symbol}</span><span class="value">${p.positionAmt} @ \$${parseFloat(p.entryPrice).toLocaleString()} <span class="${cls}">\$${parseFloat(p.unRealizedProfit).toFixed(2)}</span></span></div>`;
                 }
             } else {
                 posHtml = '<div class="metric"><span class="label">No open positions</span></div>';
@@ -216,9 +216,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             // Agents
             let agentHtml = '';
             if (data.agent_status) {
+                const reports = data.workflow_reports || {};
                 for (const [node, status] of Object.entries(data.agent_status)) {
                     const icon = {research:'🔍',hypothesis:'💡',coding:'💻',backtest:'📊',adversarial:'🛡️',decision:'⚖️',paper_trade:'📈'}[node] || '✅';
-                    agentHtml += `<div class="metric"><span class="label">${icon} ${node}</span><span class="badge badge-${status === 'active' ? 'ok' : status === 'error' ? 'crit' : 'warn'}">${status.toUpperCase()}</span></div>`;
+                    const r = reports[node];
+                    const hasReport = r && r.title;
+                    const clickHandler = hasReport ? ` onclick="document.getElementById('agent-report').style.display='block'; document.getElementById('agent-report').innerHTML='<strong>${r.title||node}</strong><br><br>${(r.content||'').replace(/'/g,"\'").replace(/
+/g,'<br>')}<br><br><em>${r.updated||''}</em>';"` : '';
+                    agentHtml += `<div class="metric" style="cursor:${hasReport?'pointer':'default'}"${clickHandler}><span class="label">${icon} ${node}${hasReport?' 📄':''}</span><span class="badge badge-${status === 'active' ? 'ok' : status === 'error' ? 'crit' : 'warn'}">${status.toUpperCase()}</span></div>`;
                 }
             }
             document.getElementById('agents').innerHTML = agentHtml || 'No agent data';
@@ -248,7 +253,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
 
 @app.get("/", response_class=HTMLResponse)
-async def dashboard(refresh: int = 10):
+async def dashboard(refresh: int = 1):
     return HTML_TEMPLATE.replace("{{ refresh_sec }}", str(refresh))
 
 
@@ -274,7 +279,16 @@ async def api_status():
             "paper_trade": "ready",
         },
         "system": {"connected": False, "pairs_loaded": 0, "total_trades": 0, "anomalies": 0},
+        "workflow_reports": {},
     }
+
+    # Load workflow reports for clickable agent cards
+    try:
+        ws_path = Path("data/processed/workflow_status.json")
+        if ws_path.exists():
+            data["workflow_reports"] = json.loads(ws_path.read_text())
+    except Exception:
+        pass
 
     # Prices + funding
     try:
@@ -295,7 +309,13 @@ async def api_status():
             positions = client.get_positions()
             data["positions"] = positions
             total_upnl = sum(float(p.get("unRealizedProfit", 0)) for p in positions)
-            data["pnl"] = {"equity": 5000.0, "total_upnl": round(total_upnl, 2), "drawdown_pct": 0.0}
+            # Get actual balance
+            try:
+                bal = client.get_balance()
+                equity = bal.get("USDT", 5000) + total_upnl
+            except Exception:
+                equity = 5000.0
+            data["pnl"] = {"equity": round(equity, 2), "total_upnl": round(total_upnl, 2), "drawdown_pct": 0.0}
         except Exception:
             pass
     except Exception:
