@@ -23,28 +23,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from loguru import logger
 
-from abundance.backtesting.costs import fetch_live_fees
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from abundance.backtesting.metrics import MetricsCalculator
 from abundance.paper_trading.engine import PaperTradingEngine
+from abundance.paper_trading.testnet_client import get_testnet_client
 
 PAIRS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 
 
-def fetch_current_data(pair: str) -> dict | None:
-    """Fetch current price and funding rate from Binance via CCXT."""
+def fetch_current_data(pair: str, client=None) -> dict | None:
+    """Fetch current price and funding rate from Binance testnet."""
     try:
-        import ccxt
+        if client is None:
+            client = get_testnet_client()
 
-        exchange = ccxt.binance({"enableRateLimit": True})
-        ccxt_symbol = f"{pair[:3]}/{pair[3:]}:USDT"  # perp symbol
-
-        # Fetch current ticker (price)
-        ticker = exchange.fetch_ticker(ccxt_symbol)
-        price = ticker["last"]
-
-        # Fetch current funding rate
-        funding = exchange.fetch_funding_rate(ccxt_symbol)
-        rate_pct = funding["fundingRate"] * 100
+        price = client.get_price(pair)
+        rate = client.get_funding_rate(pair)
+        rate_pct = rate * 100  # convert fraction → percentage
 
         timestamp_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
 
@@ -52,10 +50,10 @@ def fetch_current_data(pair: str) -> dict | None:
             "price": price,
             "funding_rate_pct": rate_pct,
             "timestamp_ms": timestamp_ms,
-            "mark_price": funding.get("markPrice", price),
+            "mark_price": price,  # approximate with price
         }
     except Exception as e:
-        logger.error(f"CCXT fetch failed: {e}")
+        logger.error(f"Testnet fetch failed: {e}")
         return None
 
 
@@ -75,13 +73,15 @@ def main() -> None:
     logger.info(f"  Mode:     {'daemon' if args.daemon else f'{args.cycles} cycle(s)'}")
     logger.info("=" * 60)
 
-    # ── Try fetching live fees ────────────────────────────
-    cost_model = fetch_live_fees() or None  # falls back to default
-    if cost_model:
-        logger.info(
-            f"Live fees loaded: maker {cost_model.perp_maker_fee*100:.2f}%, "
-            f"taker {cost_model.perp_taker_fee*100:.2f}%"
-        )
+    # ── Connect to testnet ───────────────────────────────
+    client = get_testnet_client()
+    if not client.ping():
+        logger.error("Cannot connect to testnet — aborting")
+        sys.exit(1)
+
+    from abundance.backtesting.costs import CostModel
+
+    cost_model = CostModel()
 
     # ── Initialise engine ─────────────────────────────────
     engine = PaperTradingEngine(
@@ -99,7 +99,7 @@ def main() -> None:
         logger.info(f"\n--- Cycle {cycle} ---")
 
         # Fetch current data
-        data = fetch_current_data(args.pair)
+        data = fetch_current_data(args.pair, client)
         if data is None:
             logger.warning("Data fetch failed — skipping cycle")
             time.sleep(args.interval)
