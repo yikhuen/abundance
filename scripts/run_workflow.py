@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Sprint 4: Run the agentic research-to-trading LangGraph workflow.
+"""Agent-first workflow runner — called by OpenClaw agent with real tools.
 
 Orchestrates: RESEARCH → HYPOTHESIS → CODING → BACKTEST → ADVERSARIAL → DECISION
 
-In dev mode, uses stub agents. In production, spawns real OpenClaw
-sub-agents with scoped tools.
+The agent (OpenClaw) provides real web_search/web_fetch/write/exec tools.
+No mocks, no stubs, no standalone mode.
 
 Usage:
   python scripts/run_workflow.py              # dev mode, auto-approve

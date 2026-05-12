@@ -299,10 +299,9 @@ def main():
     logger.info("Enhanced Research Agent — Wide Search + Dreaming")
     logger.info("=" * 60)
 
-    # Mock tools
-    tools = {
-        "web_search": lambda q: f"[Search: {q}]",
-    }
+    # Real tools must be provided by the calling agent
+    tools = {}
+    logger.warning("No tools provided — research agent requires web_search from OpenClaw agent")
 
     # 1. Search widely
     logger.info("\n🔍 Searching widely...")

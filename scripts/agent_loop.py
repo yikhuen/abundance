@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
-"""Autonomous agent loop with human-in-the-loop approval gate.
+"""Autonomous agent loop — agent-first, no mocks, no stubs, no templates.
 
-Runs the full autoresearch pipeline and pauses at the decision node.
-Sends summary via alerts. Waits for human approval or auto-approves
-after timeout.
+This is INFRASTRUCTURE ONLY. The intelligence comes from the OpenClaw agent
+that reads AGENTS.md and calls these functions with REAL tools.
 
-Usage:
-  python scripts/agent_loop.py                              # full auto
-  python scripts/agent_loop.py --approval-timeout 4         # 4h timeout
-  python scripts/agent_loop.py --approval-timeout 0         # require manual
-  python scripts/agent_loop.py --iterations 5 --daemon      # run continuously
+Usage by an OpenClaw agent:
+  1. Read AGENTS.md
+  2. Call run_iteration() with real web_search/web_fetch/write tools
+  3. Agent fills hypothesis, writes code, critiques, decides
+  4. Deploy only approved strategies to testnet
 """
 
-import argparse
 import json
 import sys
 import time
@@ -26,8 +24,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from loguru import logger
-
-from abundance.deployment.monitoring import AlertDispatcher
 
 
 def update_workflow_status(node: str, status: str, details: str = "") -> None:
@@ -47,15 +43,26 @@ def update_workflow_status(node: str, status: str, details: str = "") -> None:
     status_path.write_text(json.dumps(current, indent=2))
 
 
-def run_iteration(pair: str, query: str, iteration: int, previous_critique: str = "") -> dict:
+def run_iteration(
+    pair: str,
+    query: str,
+    iteration: int,
+    tools: dict,
+    previous_critique: str = "",
+) -> dict:
     """Run one full iteration of the research pipeline.
+
+    Args:
+        pair: Trading pair.
+        query: Research query.
+        iteration: Iteration number.
+        tools: Dict of REAL tool functions from the OpenClaw agent.
+            Required keys: web_search, web_fetch, write, read.
+            The agent provides these — no mocks, no stubs.
+        previous_critique: Critique from previous iteration.
 
     Returns dict with results + decision.
     """
-    import polars as pl
-
-    from abundance.backtesting.metrics import MetricsCalculator
-    from abundance.config.settings import settings
     from abundance.orchestration.agents import (
         adversarial_node,
         backtest_node,
@@ -67,19 +74,11 @@ def run_iteration(pair: str, query: str, iteration: int, previous_critique: str 
 
     task_id = f"agent-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-iter{iteration}"
 
-    # Refine query from previous critique
-    if previous_critique and "sharpe" in previous_critique.lower():
-        query = "high Sharpe ratio risk-adjusted " + query
-    elif previous_critique and "drawdown" in previous_critique.lower():
-        query = "low drawdown capital preservation " + query
-
-    # Mock tools in standalone mode
-    tools = {
-        "web_search": lambda q: f"[Search results for: {q}]",
-        "web_fetch": lambda u: f"[Fetch content from: {u}]",
-        "write": lambda p, c: Path(p).parent.mkdir(parents=True, exist_ok=True) or Path(p).write_text(c),
-        "read": lambda p: Path(p).read_text() if Path(p).exists() else "",
-    }
+    # Validate required tools
+    required = ["web_search", "web_fetch", "write"]
+    missing = [t for t in required if t not in tools]
+    if missing:
+        return {"status": "error", "error": f"Missing required tools: {missing}"}
 
     state = {
         "task_id": task_id,
@@ -142,279 +141,46 @@ def run_iteration(pair: str, query: str, iteration: int, previous_critique: str 
     }
 
 
-def wait_for_approval(result: dict, timeout_hours: int, alerts: AlertDispatcher) -> str:
-    """Wait for human approval with timeout.
+def deploy_signal(pair: str, capital: float) -> dict:
+    """Deploy current signal to testnet (dry-run safe).
 
-    Returns 'approved', 'rejected', or 'auto_approved'.
-
-    KEY RULE: If the strategy voted 'reject', timeout defaults to REJECT.
-    Auto-approve only fires if the strategy itself voted 'approve'.
+    Called by the agent when a strategy is approved.
     """
-    decision = result.get("decision", "reject")
-    summary = (
-        f"📋 Agent Decision Request\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"Pair:     {result['pair']}\n"
-        f"Strategy: {result.get('hypothesis', 'N/A')[:150]}\n"
-        f"Results:  {result.get('metrics_summary', 'N/A')}\n"
-        f"Severity: {result.get('severity', '?')}\n"
-        f"Issues:   {len(result.get('issues_found', []))}\n"
-        f"Auto-decision: {decision.upper()}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
-    )
+    from abundance.deployment.bridge import SignalComputer
+    from abundance.paper_trading.testnet_client import get_testnet_client
 
-    alerts.send("warning", f"DECISION REQUIRED ({timeout_hours}h timeout):\n{summary}")
+    client = get_testnet_client()
+    computer = SignalComputer(client)
+    sig = computer.compute(pair, capital)
 
-    if timeout_hours == 0:
-        logger.info("⏸️  Awaiting human approval (no timeout)")
-        logger.info(summary)
-        logger.info("Reply 'approve', 'reject', or 'revise' to continue")
-        return "awaiting"
-
-    # CRITICAL: only auto-approve if the model itself voted approve
-    if decision == "approve":
-        alerts.send("info", f"✅ AUTO-APPROVED (model confidence): {result.get('decision_rationale', '')}")
-        update_workflow_status("decision", "auto_approved")
-        return "auto_approved"
-    elif decision == "reject":
-        # Model said reject → respect that. No auto-approval.
-        alerts.send("info", f"❌ AUTO-REJECTED: Strategy's own verdict was REJECT — skipping deployment")
-        update_workflow_status("decision", "rejected", result.get("decision_rationale", ""))
-        return "rejected"
-    else:
-        # revise — not deployable without human input
-        alerts.send("info", f"🔄 Strategy needs revision — skipping deployment")
-        update_workflow_status("decision", "needs_revision")
-        return "rejected"
+    return {
+        "pair": sig.pair,
+        "direction": sig.direction,
+        "allocation_pct": round(sig.allocation_pct * 100, 1),
+        "price": sig.price,
+        "target_notional": round(sig.target_notional(capital), 2),
+    }
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Autonomous agent loop with HITL approval")
-    parser.add_argument("--pair", default="BTCUSDT", help="Trading pair")
-    parser.add_argument("--iterations", type=int, default=3, help="Max iterations per run")
-    parser.add_argument("--approval-timeout", type=float, default=1.0,
-                        help="Hours to wait for human approval (0 = manual, >0 = auto-approve after timeout)")
-    parser.add_argument("--daemon", action="store_true", help="Run continuously (never exits)")
-    parser.add_argument("--daemon-interval", type=int, default=86400, help="Seconds between daemon cycles (default: 24h)")
-    parser.add_argument("--monitor-interval", type=int, default=1800, help="Seconds between monitor checks (default: 30min)")
-    parser.add_argument("--query", default="profitable crypto trading strategies", help="Research seed query")
-    args = parser.parse_args()
+# ── Agent-facing entry points ──────────────────────────────────
+# These are the functions an OpenClaw agent would call.
+# The agent reads AGENTS.md, then invokes these using its native tools.
 
-    alerts = AlertDispatcher()
-    logger.info("=" * 60)
-    logger.info("Abundance — Autonomous Agent Loop")
-    logger.info(f"  Pair:             {args.pair}")
-    logger.info(f"  Iterations:       {args.iterations}")
-    logger.info(f"  Approval timeout: {'manual' if args.approval_timeout == 0 else f'{args.approval_timeout}h (auto-approve)'}")
-    logger.info(f"  Mode:             {'daemon' if args.daemon else 'once'}")
-    logger.info("=" * 60)
-
-    # Reset workflow status
-    for node in ["research", "hypothesis", "coding", "backtest", "adversarial", "decision", "paper_trade"]:
-        update_workflow_status(node, "idle")
-
-    best_result = None
-    best_sharpe = -999
-
-    while True:
-        previous_critique = ""
-        any_approved = False
-        all_results = []
-        
-        # Phase 1: Test raw ideas from search
-        raw_ideas_count = 0
-        for iteration in range(1, args.iterations + 1):
-            logger.info(f"\n{'='*50}")
-            logger.info(f"[Phase 1: Raw Ideas] Iteration {iteration}/{args.iterations}")
-            logger.info(f"{'='*50}")
-
-            result = run_iteration(args.pair, args.query, iteration, previous_critique)
-
-            if result["status"] != "ok":
-                logger.error(f"Iteration {iteration} failed: {result.get('error')}")
-                continue
-
-            all_results.append(result)
-
-            # ── Generative-Adversarial Refinement Loop ──────
-            # Refine strategy if adversarial critique finds issues
-            refine_count = 0
-            MAX_REFINEMENTS = 2
-            while refine_count < MAX_REFINEMENTS:
-                severity = result.get("severity", "low")
-                issues = result.get("issues_found", [])
-                sharpe = result.get("backtest_results", {}).get("sharpe", -999)
-
-                # Check if refinement is needed
-                needs_refinement = (
-                    severity in ("high", "critical")
-                    or (isinstance(sharpe, (int, float)) and sharpe < 0)
-                    or len(issues) > 2
-                )
-
-                if not needs_refinement:
-                    logger.info(f"  ✅ Strategy passes adversarial review (severity: {severity}, issues: {len(issues)})")
-                    break
-
-                refine_count += 1
-                logger.info(f"  🔄 Refinement {refine_count}/{MAX_REFINEMENTS} — addressing: {', '.join(issues[:2])}")
-                update_workflow_status("adversarial", f"refining_{refine_count}")
-
-                # Refine: re-run coding with critique as feedback
-                refined = run_iteration(
-                    args.pair,
-                    f"refine strategy addressing: {'; '.join(issues[:2])}",
-                    iteration,
-                    previous_critique="\n".join(issues),
-                )
-                if refined["status"] == "ok":
-                    result = refined
-                    logger.info(f"  Refined: Sharpe {result.get('backtest_results', {}).get('sharpe', '?')}, severity {result.get('severity', '?')}")
-                else:
-                    logger.warning(f"  Refinement failed — keeping previous version")
-                    break
-
-            if refine_count >= MAX_REFINEMENTS:
-                logger.warning(f"  Max refinements ({MAX_REFINEMENTS}) reached — proceeding with current version")
-
-            previous_critique = result.get("critique", "")
-
-            # Track best
-            sharpe = result.get("backtest_results", {}).get("sharpe", -999)
-            if isinstance(sharpe, (int, float)) and sharpe > best_sharpe:
-                best_sharpe = sharpe
-                best_result = result
-
-            # ── HITL Decision Gate ──────────────────────────
-            approval = wait_for_approval(result, args.approval_timeout, alerts)
-
-            if approval == "auto_approved":
-                update_workflow_status("paper_trade", "deploying")
-                logger.info(f"📈 Deploying {result.get('strategy_file', '?')} to testnet")
-
-                # Trigger deployment (dry-run for safety)
-                try:
-                    from abundance.deployment.bridge import OrderManager, SignalComputer
-                    from abundance.paper_trading.testnet_client import get_testnet_client
-
-                    client = get_testnet_client()
-                    computer = SignalComputer(client)
-                    sig = computer.compute(args.pair, 500)
-                    logger.info(f"  Signal: {sig.direction} @ {sig.allocation_pct*100:.0f}% — ready to deploy")
-                    alerts.send("info", f"📈 Strategy deployed: {sig.direction} {sig.pair} @ {sig.allocation_pct*100:.0f}%")
-                except Exception as e:
-                    logger.error(f"Deployment failed: {e}")
-
-                update_workflow_status("paper_trade", "deployed")
-                break  # Exit iteration loop after successful deployment
-
-            elif approval == "rejected":
-                logger.info(f"Strategy rejected — continuing to next iteration")
-                update_workflow_status("decision", "rejected")
-                continue
-
-            elif approval == "awaiting":
-                logger.info("Awaiting human response — pausing agent")
-                # In production: sleep and poll for response
-                # For now: break out
-                break
-
-        # Phase 2: If no raw ideas succeeded, load dreams and test them
-        any_approved = any(r.get("status") == "approved" for r in all_results)
-        # Actually track: did any iteration get approved?
-        any_approved = False  # will be set during iterations
-        
-        if not any_approved and previous_critique:
-            logger.info(f"\n{'='*50}")
-            logger.info(f"[Phase 2: Dream Testing] All raw ideas rejected — testing dreams")
-            logger.info(f"{'='*50}")
-            
-            # Load dreams from research agent
-            dreams_path = Path("data/processed/dreams.json")
-            if dreams_path.exists():
-                dreams = json.loads(dreams_path.read_text())
-                logger.info(f"  {len(dreams)} dreams to test")
-                
-                for di, dream in enumerate(dreams[:3]):  # test top 3 dreams
-                    dream_type = dream.get("type", "unknown")
-                    dream_desc = dream.get("dream", "")[:100]
-                    logger.info(f"  Dream {di+1}: [{dream_type}] {dream_desc}")
-                    
-                    # Parameter tuning dreams
-                    if dream_type == "parameter_tuning":
-                        strategy_name = dream.get("strategy", "")
-                        params = dream.get("current_params", {})
-                        # Test with wider parameter ranges
-                        logger.info(f"    Tuning {strategy_name}: {list(params.keys())[:3]}")
-                        # (In production: run parameter sweep here)
-                    
-                    # Composition dreams
-                    elif dream_type == "composition":
-                        ingredients = dream.get("ingredients", [])
-                        logger.info(f"    Composing: {', '.join(ingredients)}")
-                        # (In production: build composite strategy here)
-            else:
-                logger.info("  No dreams file found — running research agent to generate")
-                try:
-                    import subprocess
-                    subprocess.run(
-                        ["poetry", "run", "python", "scripts/research_agent.py"],
-                        cwd="/home/yikhuen/abundance", capture_output=True, timeout=30
-                    )
-                except Exception as e:
-                    logger.warning(f"Research agent failed: {e}")
-
-        # ── End of run summary ──────────────────────────────
-        if best_result:
-            logger.info(f"\n{'='*60}")
-            logger.info(f"Best strategy this run:")
-            logger.info(f"  Iteration: {best_result['iteration']}")
-            logger.info(f"  Hypothesis: {best_result.get('hypothesis', '?')[:120]}")
-            logger.info(f"  Sharpe: {best_result.get('backtest_results', {}).get('sharpe', '?')}")
-            logger.info(f"  Decision: {best_result.get('decision', '?')}")
-            logger.info(f"{'='*60}")
-
-        if not args.daemon:
-            break
-
-        # ── Daemon: monitor + sleep + repeat. Never exits. ──
-        crash_count = 0
-        
-        # Inter-cycle monitoring (price checks between research runs)
-        monitor_cycles = args.daemon_interval // args.monitor_interval
-        for mc in range(monitor_cycles):
-            try:
-                logger.info(f"[Monitor {mc+1}/{monitor_cycles}] Checking prices...")
-                from abundance.paper_trading.testnet_client import get_testnet_client
-                c = get_testnet_client()
-                btc = c.get_price("BTCUSDT")
-                
-                # Quick health checks
-                pos = c.get_positions()
-                total_upnl = sum(float(p.get("unRealizedProfit", 0)) for p in pos)
-                
-                # Check for anomalies
-                if abs(total_upnl) > 100:
-                    alerts.send("warning", f"Large uPnL: \${total_upnl:+,.2f}")
-                if len(pos) > 10:
-                    alerts.send("warning", f"High position count: {len(pos)}")
-                    
-            except Exception as e:
-                crash_count += 1
-                logger.error(f"Monitor error (crash #{crash_count}): {e}")
-                if crash_count > 5:
-                    alerts.send("critical", f"Too many crashes ({crash_count}) — pausing 10min")
-                    time.sleep(600)
-                    crash_count = 0
-            
-            time.sleep(args.monitor_interval)
-
-    # Reset to idle
-    for node in ["research", "hypothesis", "coding", "backtest", "adversarial", "decision", "paper_trade"]:
-        update_workflow_status(node, "completed")
-
-    logger.info("Agent loop complete")
+def agent_research(pair: str, tools: dict) -> dict:
+    """Run a single research cycle and return findings."""
+    return run_iteration(pair, "profitable crypto trading strategies", 1, tools)
 
 
-if __name__ == "__main__":
-    main()
+def agent_deploy_check(pair: str, capital: float = 500) -> dict:
+    """Check what would be deployed (dry-run)."""
+    return deploy_signal(pair, capital)
+
+
+def agent_status() -> dict:
+    """Return full system status for the dashboard."""
+    from abundance.deployment.validation import deployment_readiness_check
+
+    return {
+        "readiness": deployment_readiness_check(),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }

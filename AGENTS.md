@@ -263,3 +263,43 @@ TRADE → OBSERVE → DIAGNOSE → FIX → TRADE AGAIN
 ## Version
 
 This AGENTS.md is a living document. Update it with every significant learning. The agent that wakes up 6 months from now should be smarter than the one reading this today.
+## Agent-First Architecture
+
+**This repo contains ZERO mock code. ZERO stubs. ZERO templates.**
+Every function expects REAL tools from you, the OpenClaw agent.
+
+### How You (the agent) Use This Repo
+
+```
+1. Read this AGENTS.md
+2. Verify system: run deployment_readiness_check()
+3. Research: use YOUR web_search tool → find papers
+4. Hypothesis: use YOUR LLM → write a testable hypothesis  
+5. Code: use YOUR write tool → save strategy to src/strategies/
+6. Backtest: import strategy module or exec backtest scripts
+7. Adversarial: use YOUR LLM → critique the strategy
+8. Decide: approve (Sharpe>0, test holds) or reject
+9. Deploy: scripts/deploy.py --live (testnet only)
+10. Monitor: dashboard at http://localhost:8080
+```
+
+### Your Native Tools (OpenClaw provides these)
+
+| Tool | How to use in this repo |
+|---|---|
+| `web_search(query)` | Find papers, strategies, market context |
+| `web_fetch(url)` | Read arXiv abstracts, paper details |
+| `write(path, content)` | Save strategy code, log failures/successes |
+| `read(path)` | Read existing strategies, logs, state files |
+| `exec(command)` | Run backtests, deploy, validate |
+
+### Repo Commands (call via exec)
+
+| Command | What it does |
+|---|---|
+| `poetry run python scripts/deploy.py --pair BTC --live` | Place testnet orders |
+| `poetry run python scripts/dashboard.py --port 8080 &` | Start dashboard |
+| `poetry run python scripts/monitor_daemon.py --once` | Health check |
+| `poetry run python scripts/backtest_baseline.py` | Run backtest |
+| `poetry run python scripts/validate_data.py` | Data check |
+| `python -c "from abundance.deployment.validation import deployment_readiness_check..."` | System check |
