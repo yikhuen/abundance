@@ -15,6 +15,7 @@ import polars as pl
 from loguru import logger
 
 from abundance.backtesting.carry_strategy import CarryStrategy, run_carry_backtest
+from abundance.backtesting.costs import COST_MODEL
 from abundance.backtesting.metrics import MetricsCalculator
 from abundance.config.settings import settings
 
@@ -47,7 +48,9 @@ def run_single(pair: str) -> dict:
     kline, funding = load_pair_data(pair)
     strategy = CarryStrategy.from_pair(pair)
 
-    equity_curve, report, trades = run_carry_backtest(kline, funding, strategy)
+    equity_curve, report, trades = run_carry_backtest(
+        kline, funding, strategy, cost_model=COST_MODEL
+    )
 
     # Buy & hold benchmark (same period)
     close = kline["close"]
@@ -82,7 +85,9 @@ def run_threshold_sweep(pair: str) -> list[dict]:
             entry_threshold_pct=entry,
             exit_threshold_pct=entry / 2,
         )
-        _, report, trades = run_carry_backtest(kline, funding, strategy)
+        _, report, trades = run_carry_backtest(
+            kline, funding, strategy, cost_model=COST_MODEL
+        )
 
         results.append(
             {
