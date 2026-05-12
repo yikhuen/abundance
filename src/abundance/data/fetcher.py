@@ -63,6 +63,9 @@ class DataFetcher(ABC):
             open_time, open, high, low, close, volume,
             close_time, quote_volume, trades, taker_buy_volume,
             taker_buy_quote_volume, ignore
+
+        Handles mixed timestamp units: pre-2025 uses milliseconds,
+        2025+ uses microseconds. Normalizes everything to milliseconds.
         """
         rename_map = {
             "open_time": "timestamp_ms",
@@ -86,6 +89,13 @@ class DataFetcher(ABC):
             if c in df.columns
         ]
         for col in timestamp_cols:
-            df = df.with_columns(pl.col(col).cast(pl.Int64))
+            # Per-row normalization: µs timestamps (>1e15) → ms, ms rows unchanged
+            df = df.with_columns(
+                pl.when(pl.col(col).cast(pl.Int64) > 1e15)
+                .then(pl.col(col).cast(pl.Int64) / 1000)
+                .otherwise(pl.col(col).cast(pl.Int64))
+                .cast(pl.Int64)
+                .alias(col)
+            )
 
         return df

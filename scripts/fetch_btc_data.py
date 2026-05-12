@@ -59,16 +59,16 @@ def main() -> None:
     parquet_path = fetcher.save_parquet(df, partition_cols=["year", "month"])
     logger.info(f"Parquet files written to: {parquet_path}")
 
-    # ── Step 3: Validate with Polars (fast on WSL2 mounts) ──────
+    # ── Step 3: Validate with Polars ───────────────────────────
     validate = pl.scan_parquet(str(parquet_path / "**" / "*.parquet"))
     ts_min_ms = validate.select(pl.col("timestamp_ms").min()).collect().item()
     ts_max_ms = validate.select(pl.col("timestamp_ms").max()).collect().item()
     row_count = validate.select(pl.len()).collect().item()
 
-    from datetime import datetime
+    from datetime import datetime, timezone
 
-    ts_min = datetime.fromtimestamp(ts_min_ms / 1000).isoformat()
-    ts_max = datetime.fromtimestamp(ts_max_ms / 1000).isoformat()
+    ts_min = datetime.fromtimestamp(ts_min_ms / 1000, tz=timezone.utc).isoformat()
+    ts_max = datetime.fromtimestamp(ts_max_ms / 1000, tz=timezone.utc).isoformat()
 
     logger.info("Parquet validation:")
     logger.info(f"  Range: {ts_min} → {ts_max}")
