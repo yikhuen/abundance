@@ -8,7 +8,7 @@ license = "MIT"
 package-mode = true
 
 [tool.poetry.dependencies]
-python = ">=3.10,<4.0"
+python = ">=3.12,<4.0"
 ccxt = ">=4.0"
 duckdb = ">=1.0"
 polars = ">=1.0"
@@ -21,6 +21,7 @@ pydantic-settings = ">=2.0"
 python-dotenv = ">=1.0"
 loguru = ">=0.7"
 tenacity = ">=8.0"
+nautilus-trader = { version = ">=1.200,<2.0", python = ">=3.12,<3.15", optional = false }
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.0"
