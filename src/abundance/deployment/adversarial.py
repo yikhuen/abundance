@@ -48,6 +48,7 @@ def check_lookahead(strategy: Strategy, pair: str = "BTCUSDT") -> AdversarialRes
     ).sort("timestamp_ms").collect()
     N = len(df)
 
+    strategy.set_pair(pair)
     full_signals = strategy.signals(df)
     issues = []
 
@@ -55,6 +56,7 @@ def check_lookahead(strategy: Strategy, pair: str = "BTCUSDT") -> AdversarialRes
         if t <= 0 or t >= N:
             continue
         df_trunc = df[:t]
+        strategy.set_pair(pair)
         trunc_signals = strategy.signals(df_trunc)
         idx = t - 1
         if idx >= len(trunc_signals):
@@ -209,7 +211,7 @@ def check_parameter_sensitivity(strategy: Strategy, pair: str = "BTCUSDT") -> Ad
             if sig[i] > sig[i-1]: t = entry_cost
             elif sig[i] < sig[i-1]: t = exit_cost
             nr[i] = g-t
-        sub = [r for r in nr[1:] if r != 0]
+        sub = nr[1:]
         if len(sub) < 20: return 0.0
         m = sum(sub)/len(sub); v = sum((r-m)**2 for r in sub)/len(sub)
         return (m/v**0.5)*(365**0.5) if v > 0 else 0.0
@@ -256,6 +258,65 @@ def check_parameter_sensitivity(strategy: Strategy, pair: str = "BTCUSDT") -> Ad
     )
 
 
+def check_strategy_uses_abc(strategy: Strategy, pair: str = "BTCUSDT") -> AdversarialResult:
+    """Verify the strategy exposes a non-empty, non-trivial signal vector via signals().
+
+    Strategies that bypass the ABC by returning [] from signals() and computing
+    everything inside an overridden run() cannot be properly audited for lookahead,
+    signal sanity, or parameter sensitivity. This check closes that loophole.
+
+    The check loads the same daily-kline data the other checks use, calls
+    strategy.signals(df), and rejects if the result is empty, length-mismatched,
+    or all-zero. Severity is critical because none of the other checks are
+    meaningful without a real signal array.
+    """
+    plower = pair.lower()
+    df = pl.scan_parquet(
+        str(settings.raw_dir / "klines" / f"{plower}_1d" / "**" / "*.parquet")
+    ).sort("timestamp_ms").collect()
+    N = len(df)
+
+    strategy.set_pair(pair)
+    issues = []
+    try:
+        sig = strategy.signals(df)
+    except Exception as e:
+        issues.append({
+            "check": "abc_compliance",
+            "detail": f"strategy.signals(df) raised: {e}",
+        })
+        return AdversarialResult(
+            passed=False, severity="critical", issues=issues,
+            checks_run=["abc_compliance: signals() must execute"],
+        )
+
+    if not sig or len(sig) == 0:
+        issues.append({
+            "check": "abc_compliance",
+            "signal_length": 0,
+            "detail": "signals() returned empty list — strategy bypasses ABC audit surface",
+        })
+    elif len(sig) != N:
+        issues.append({
+            "check": "abc_compliance",
+            "signal_length": len(sig), "data_length": N,
+            "detail": f"signals() length {len(sig)} != data length {N}",
+        })
+    elif all(abs(s) < 1e-9 for s in sig):
+        issues.append({
+            "check": "abc_compliance",
+            "detail": "signals() returned all zeros — likely stub implementation",
+        })
+
+    severity = "critical" if issues else "low"
+    return AdversarialResult(
+        passed=len(issues) == 0,
+        severity=severity,
+        issues=issues,
+        checks_run=[f"abc_compliance: signals() returns {len(sig) if sig else 0} values"],
+    )
+
+
 def run_full_adversarial(
     strategy: Strategy, pair: str = "BTCUSDT"
 ) -> dict:
@@ -264,6 +325,7 @@ def run_full_adversarial(
     Returns a dict with overall pass/fail, severity, and per-check details.
     """
     checks = [
+        ("abc_compliance", check_strategy_uses_abc(strategy, pair)),
         ("lookahead", check_lookahead(strategy, pair)),
         ("signal_sanity", check_signal_sanity(strategy.run(pair))),
         ("walk_forward", check_walk_forward(strategy, pair)),
