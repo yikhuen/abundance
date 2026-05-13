@@ -33,10 +33,6 @@ class EMA20Strategy(Strategy):
     def _get_params(self) -> dict:
         return {"ema_period": self.ema_period}
 
-    def _detect_pair(self, df: pl.DataFrame) -> str:
-        return "BTCUSDT"
-
-
 def run_strategy(pair: str = "BTCUSDT", ema_period: int = 20):
     s = EMA20Strategy(ema_period=ema_period)
     art = s.run(pair)

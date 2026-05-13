@@ -1,222 +1,120 @@
-"""He, Manela, Ross & von Wachter (2022/2024) — No-Arbitrage Perp Strategy.
+"""He, Manela, Ross & von Wachter (2022) — No-Arbitrage Perp Strategy.
 
 Paper: "Fundamentals of Perpetual Futures" (arXiv:2212.06888)
-Reported Sharpe: 1.8 (retail) to 3.5 (market maker) on BTC.
+Economic mechanism: When actual perp price deviates from theoretical
+no-arbitrage price, enter delta-neutral position to capture convergence.
 
-Strategy: Compute theoretical no-arbitrage perpetual price from spot price
-and funding rate. When actual perp price deviates from this theoretical price
-beyond a threshold, enter a delta-neutral position to capture the convergence.
-
-Formula: F_theoretical = S × (1 + r×t) / (1 + f×t)
-  - S = spot price
-  - r = risk-free rate (annualized)
-  - f = funding rate (annualized, from 8h periodic rate)
-  - t = time fraction (8h/8760h ≈ 0.000913)
-
-Position: delta-neutral (short perp + long spot when F > theoretical)
+F_theoretical = S × (1 + rT) / (1 + fT)
+Strategy: delta-neutral (short perp + long spot when F > theoretical)
+Implements Strategy ABC with multi-source data (spot, perp, funding).
 """
-
 import sys
 from pathlib import Path
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-
 import polars as pl
-
-from abundance.backtesting.costs import COST_MODEL
-from abundance.backtesting.metrics import MetricsCalculator, MetricsReport
+from abundance.strategies.base import Strategy, StrategyArtifacts
 from abundance.config.settings import settings
+from abundance.backtesting.costs import COST_MODEL
 
 
-def annualize_funding(rate_8h_pct: float) -> float:
-    """Convert 8h funding rate percentage to annualised.
+class HeArbitrageStrategy(Strategy):
+    """He et al. no-arbitrage perpetual convergence."""
 
-    Binance funding interval: 8 hours = 3×/day = 1095×/year.
-    rate_8h_pct is e.g. 0.01 (meaning 0.01% per 8h period).
-    """
-    periods_per_year = 365.25 * 3  # 3 funding periods per day
-    rate_per_period = rate_8h_pct / 100  # convert pct → decimal
-    return (1 + rate_per_period) ** periods_per_year - 1
+    def __init__(self, entry_threshold_pct: float = 0.05, exit_threshold_pct: float = 0.01,
+                 position_size_pct: float = 0.10, risk_free: float = 0.04):
+        self.entry_threshold_pct = entry_threshold_pct
+        self.exit_threshold_pct = exit_threshold_pct
+        self.position_size_pct = position_size_pct
+        self.risk_free = risk_free
 
+    def signals(self, df: pl.DataFrame) -> list[float]:
+        return []
 
-def theoretical_perp_price(
-    spot: float,
-    funding_rate_pct: float,
-    risk_free: float = 0.04,
-    hours_to_funding: float = 8.0,
-) -> float:
-    """Compute no-arbitrage perpetual futures price.
+    def run(self, pair: str = "BTCUSDT") -> StrategyArtifacts:
+        self.set_pair(pair)
+        plower = pair.lower()
 
-    He et al. (2022) formula:
-      F = S × (1 + r×T) / (1 + f×T)
+        spot = (pl.scan_parquet(str(settings.raw_dir/"klines"/f"{plower}_1h"/"**"/"*.parquet"))
+                .sort("timestamp_ms").select(["timestamp_ms","close"]).collect())
+        perp = (pl.scan_parquet(str(settings.raw_dir/"perp_klines"/f"{plower}_1h"/"**"/"*.parquet"))
+                .sort("timestamp_ms").select(["timestamp_ms","close"]).collect())
+        funding = (pl.scan_parquet(str(settings.raw_dir/"funding"/plower/"**"/"*.parquet"))
+                   .sort("timestamp_ms").collect())
 
-    where T = hours_to_funding / (365.25 × 24)
-    """
-    T = hours_to_funding / (365.25 * 24)
-    f = funding_rate_pct / 100  # decimal
-    r = risk_free
+        sts = spot["timestamp_ms"].to_list(); sc = spot["close"].to_list()
+        pts = perp["timestamp_ms"].to_list(); pc = perp["close"].to_list()
+        fr = funding["funding_rate_pct"].to_list(); fts = funding["timestamp_ms"].to_list()
 
-    if 1 + f * T <= 0:
-        return spot
-    return spot * (1 + r * T) / (1 + f * T)
+        entry_cost = COST_MODEL.entry_cost(pair, use_perp=True)
+        exit_cost = COST_MODEL.exit_cost(pair, use_perp=True)
 
+        def spot_at(t): return _near(sts, sc, t)
+        def perp_at(t): return _near(pts, pc, t)
 
-def run_strategy(
-    pair: str = "BTCUSDT",
-    entry_threshold_pct: float = 0.05,  # 0.05% deviation to enter
-    exit_threshold_pct: float = 0.01,   # 0.01% to exit
-    position_size_pct: float = 0.10,
-    risk_free: float = 0.04,
-) -> tuple[pl.DataFrame, MetricsReport]:
-    """He et al. (2022) no-arbitrage perpetual strategy.
+        capital = 10000.0; equity = [(fts[0], capital)]; trades = []; sig = [0.0]*len(fts)
+        in_pos = False; pos_cap = 0.0; pos_entry_p = 0.0; pos_entry_s = 0.0; pos_type = ""
 
-    Args:
-        pair: Trading pair.
-        entry_threshold_pct: Minimum deviation (%) from theoretical to enter.
-        exit_threshold_pct: Deviation below which we exit.
-        position_size_pct: Fraction of capital per trade.
-        risk_free: Annual risk-free rate (4% default).
-    """
-    pair_lower = pair.lower()
-    cost = COST_MODEL
+        for i in range(1, len(fts)):
+            ts = fts[i]; rate_prev = fr[i-1]
+            sp = spot_at(ts); pp = perp_at(ts)
+            if sp <= 0 or pp <= 0: continue
 
-    # Load spot klines
-    spot = (
-        pl.scan_parquet(
-            str(settings.raw_dir / "klines" / f"{pair_lower}_1h" / "**" / "*.parquet")
-        )
-        .sort("timestamp_ms")
-        .select(["timestamp_ms", "close"])
-        .collect()
-    )
+            T = 8.0/(365.25*24); f = rate_prev/100; r = self.risk_free
+            theory = sp * (1+r*T)/(1+f*T) if 1+f*T > 0 else sp
+            dev = (pp-theory)/theory*100
 
-    # Load perp klines
-    perp = (
-        pl.scan_parquet(
-            str(settings.raw_dir / "perp_klines" / f"{pair_lower}_1h" / "**" / "*.parquet")
-        )
-        .sort("timestamp_ms")
-        .select(["timestamp_ms", "close"])
-        .collect()
-    )
-
-    # Load funding rates
-    funding = (
-        pl.scan_parquet(
-            str(settings.raw_dir / "funding" / pair_lower / "**" / "*.parquet")
-        )
-        .sort("timestamp_ms")
-        .collect()
-    )
-
-    # Align data: build sorted lookup arrays, filter nulls
-    spot_raw = [(t, c) for t, c in zip(spot["timestamp_ms"].to_list(), spot["close"].to_list()) if t is not None]
-    spot_ts_arr = [x[0] for x in spot_raw]
-    spot_close_arr = [x[1] for x in spot_raw]
-    perp_raw = [(t, c) for t, c in zip(perp["timestamp_ms"].to_list(), perp["close"].to_list()) if t is not None]
-    perp_ts_arr = [x[0] for x in perp_raw]
-    perp_close_arr = [x[1] for x in perp_raw]
-
-    def nearest(arr_ts, arr_val, target):
-        """Binary-search nearest value with ts ≤ target."""
-        lo, hi = 0, len(arr_ts) - 1
-        best = None
-        while lo <= hi:
-            mid = (lo + hi) // 2
-            if arr_ts[mid] is not None and arr_ts[mid] <= target:
-                best = arr_val[mid]
-                lo = mid + 1
-            else:
-                hi = mid - 1
-        return best if best is not None else 0.0
-
-    funding_list = funding["funding_rate_pct"].to_list()
-    funding_ts_list = funding["timestamp_ms"].to_list()
-
-    # Build aligned time series at funding intervals (most informative)
-    capital = 10_000.0
-    equity = [(funding_ts_list[0], capital)]
-    trades_list = []
-    in_position = False
-    pos_capital = 0.0
-    pos_entry_perp = 0.0
-    pos_entry_spot = 0.0
-    pos_type = ""  # "long_perp_short_spot" or "short_perp_long_spot"
-
-    for i in range(1, len(funding_ts_list)):
-        ts = funding_ts_list[i]
-        rate = funding_list[i - 1]  # previous period's rate (no lookahead)
-
-        # Get spot and perp prices nearest to this funding timestamp
-        spot_price = nearest(spot_ts_arr, spot_close_arr, ts)
-        perp_price = nearest(perp_ts_arr, perp_close_arr, ts)
-        if spot_price is None or perp_price is None or spot_price <= 0 or perp_price <= 0:
-            continue
-
-        # Compute theoretical price
-        theory = theoretical_perp_price(spot_price, rate, risk_free)
-
-        # Deviation: actual vs theoretical (as percentage)
-        deviation_pct = (perp_price - theory) / theory * 100
-
-        # ── Exit logic ──────────────────────────────────
-        if in_position:
-            if abs(deviation_pct) < exit_threshold_pct:
-                # Close: convergence achieved
-                spot_pnl = 0.0
+            # Exit
+            if in_pos and abs(dev) < self.exit_threshold_pct:
                 if pos_type == "short_perp_long_spot":
-                    # Short perp: profit when perp drops relative to spot
-                    perp_pnl = (pos_entry_perp - perp_price) / pos_entry_perp * pos_capital
-                    spot_pnl = (spot_price / pos_entry_spot - 1) * pos_capital
-                    gross = perp_pnl + spot_pnl
+                    perp_pnl = (pos_entry_p-pp)/pos_entry_p*pos_cap
+                    spot_pnl = (sp/pos_entry_s-1)*pos_cap
                 else:
-                    # Long perp, short spot
-                    perp_pnl = (perp_price / pos_entry_perp - 1) * pos_capital
-                    spot_pnl = (1 - spot_price / pos_entry_spot) * pos_capital
-                    gross = perp_pnl + spot_pnl
+                    perp_pnl = (pp/pos_entry_p-1)*pos_cap
+                    spot_pnl = (1-sp/pos_entry_s)*pos_cap
+                gross = perp_pnl+spot_pnl; net = gross - exit_cost*pos_cap
+                capital += net
+                trades.append({"entry_bar":i,"pnl":net})
+                in_pos = False; sig[i] = 0.0
 
-                rt_cost = cost.round_trip_cost(pair, use_perp=True) * pos_capital
-                net_pnl = gross - rt_cost
-                capital += net_pnl
-                trades_list.append({"pnl": net_pnl, "return_pct": net_pnl / pos_capital * 100})
-                in_position = False
+            # Entry
+            if not in_pos and abs(dev) > self.entry_threshold_pct:
+                pos_cap = capital*self.position_size_pct
+                pos_entry_p = pp; pos_entry_s = sp
+                pos_type = "short_perp_long_spot" if dev > 0 else "long_perp_short_spot"
+                in_pos = True; sig[i] = 1.0
+                capital -= entry_cost*pos_cap
 
-        # ── Entry logic ──────────────────────────────────
-        if not in_position and abs(deviation_pct) > entry_threshold_pct:
-            pos_capital = capital * position_size_pct
-            pos_entry_perp = perp_price
-            pos_entry_spot = spot_price
-            if deviation_pct > 0:
-                pos_type = "short_perp_long_spot"
-            else:
-                pos_type = "long_perp_short_spot"
-            in_position = True
+            if in_pos: sig[i] = 1.0
 
-        # ── Record equity ────────────────────────────────
-        eq_val = capital
-        if in_position and pos_entry_perp > 0:
-            perp_delta = (perp_price / pos_entry_perp - 1) * pos_capital
-            if pos_type == "short_perp_long_spot":
-                perp_delta = -perp_delta
-            eq_val = capital + perp_delta
-        equity.append((ts, eq_val))
+            eq = capital
+            if in_pos and pos_entry_p > 0:
+                delta = (pp/pos_entry_p-1)*pos_cap
+                if pos_type == "short_perp_long_spot": delta = -delta
+                eq += delta
+            equity.append((ts, max(eq, 0.01)))
 
-    equity_df = pl.DataFrame(equity, schema=["timestamp_ms", "equity"], orient="row")
-    trades_df = pl.DataFrame(trades_list) if trades_list else None
-    report = MetricsCalculator.from_equity_curve(equity_df, trades_df)
+        eq_df = pl.DataFrame(equity, schema=["timestamp_ms","equity"], orient="row")
+        from abundance.backtesting.metrics import MetricsCalculator
+        mc = MetricsCalculator.from_equity_curve(eq_df); mc.trades = len(trades)
+        return StrategyArtifacts(signals=sig, equity_curve=eq_df, metrics=mc, trades=trades,
+                                 params=self._get_params(), pair=pair)
 
-    return equity_df, report
+    def _get_params(self) -> dict:
+        return {"entry_threshold_pct": self.entry_threshold_pct,
+                "exit_threshold_pct": self.exit_threshold_pct,
+                "position_size_pct": self.position_size_pct, "risk_free": self.risk_free}
 
 
-def _nearest(arr_ts, arr_val, ts: int) -> float:
-    """Binary-search nearest value with key ≤ ts."""
-    lo, hi = 0, len(arr_ts) - 1
-    best = 0.0
+def _near(arr_ts, arr_val, target):
+    lo, hi = 0, len(arr_ts)-1; best = 0.0
     while lo <= hi:
-        mid = (lo + hi) // 2
-        if arr_ts[mid] <= ts:
-            best = arr_val[mid]
-            lo = mid + 1
-        else:
-            hi = mid - 1
+        mid = (lo+hi)//2
+        if arr_ts[mid] <= target: best = arr_val[mid]; lo = mid+1
+        else: hi = mid-1
     return best
+
+
+def run_strategy(pair="BTCUSDT"):
+    s = HeArbitrageStrategy()
+    art = s.run(pair)
+    return art.equity_curve, art.metrics

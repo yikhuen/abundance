@@ -103,10 +103,6 @@ class ADXBlendStrategy(Strategy):
             "slow_ema": self.slow_ema,
         }
 
-    def _detect_pair(self, df: pl.DataFrame) -> str:
-        return "BTCUSDT"
-
-
 def run_strategy(pair: str = "BTCUSDT"):
     s = ADXBlendStrategy()
     art = s.run(pair)

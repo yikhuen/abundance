@@ -31,10 +31,6 @@ class DonchianStrategy(Strategy):
     def _get_params(self) -> dict:
         return {"n": self.n}
 
-    def _detect_pair(self, df: pl.DataFrame) -> str:
-        return "BTCUSDT"
-
-
 def run_strategy(pair: str = "BTCUSDT", n: int = 20):
     s = DonchianStrategy(n=n)
     art = s.run(pair)

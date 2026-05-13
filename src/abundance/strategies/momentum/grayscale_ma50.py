@@ -31,10 +31,6 @@ class MA50Strategy(Strategy):
     def _get_params(self) -> dict:
         return {"ma_period": self.ma_period}
 
-    def _detect_pair(self, df: pl.DataFrame) -> str:
-        return "BTCUSDT"
-
-
 # Backward-compatible runner
 def run_strategy(pair: str = "BTCUSDT", ma_period: int = 50):
     s = MA50Strategy(ma_period=ma_period)

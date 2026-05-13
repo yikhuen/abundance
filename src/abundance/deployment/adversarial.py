@@ -146,12 +146,12 @@ def check_walk_forward(strategy: Strategy, pair: str = "BTCUSDT") -> Adversarial
     exit_cost = COST_MODEL.exit_cost(pair, use_perp=True)
 
     def sharpe_from_returns(net_ret, start, end):
-        sub = [r for r in net_ret[start:end] if r != 0] if any(r != 0 for r in net_ret[start:end]) else [0]
-        if len(sub) < 20 or all(r == 0 for r in sub):
+        sub = net_ret[start:end]
+        if len(sub) < 20:
             return 0.0
         mean = sum(sub) / len(sub)
         var = sum((r - mean)**2 for r in sub) / len(sub)
-        return (mean / (var**0.5)) * (252**0.5) if var > 0 else 0.0
+        return (mean / (var**0.5)) * (365**0.5) if var > 0 else 0.0
 
     net_ret = [0.0] * N
     for i in range(1, N):
@@ -212,7 +212,7 @@ def check_parameter_sensitivity(strategy: Strategy, pair: str = "BTCUSDT") -> Ad
         sub = [r for r in nr[1:] if r != 0]
         if len(sub) < 20: return 0.0
         m = sum(sub)/len(sub); v = sum((r-m)**2 for r in sub)/len(sub)
-        return (m/v**0.5)*(252**0.5) if v > 0 else 0.0
+        return (m/v**0.5)*(365**0.5) if v > 0 else 0.0
 
     base_sharpe = compute_sharpe(strategy.signals(df))
     params = strategy._get_params()

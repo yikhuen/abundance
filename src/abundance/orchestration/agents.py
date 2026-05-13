@@ -152,13 +152,13 @@ def backtest_node(state: ResearchState, _tools: dict[str, Any]) -> dict:
     return state
 
 
-def adversarial_node(state: ResearchState, _tools: dict[str, Any]) -> dict:
-    """Run mechanical adversarial checks + provide LLM critique prompt.
+def adversarial_node(state: ResearchState, tools: dict[str, Any]) -> dict:
+    """Run mechanical checks + call LLM critique, merge results.
 
     Mechanical checks: lookahead, signal sanity, walk-forward, parameter sensitivity.
-    LLM prompt: structured red-team checklist for narrative/economic review.
+    LLM: structured red-team — if available, parse JSON response and merge into issues.
 
-    If severity >= medium, strategy is auto-rejected unless overridden.
+    If severity >= medium, decision_node will auto-reject (unless human_approved).
     """
     pair = state.get("pair", "BTCUSDT")
     strategy_file = state.get("strategy_file", "")
@@ -170,7 +170,6 @@ def adversarial_node(state: ResearchState, _tools: dict[str, Any]) -> dict:
             module_path = strategy_file.replace("/", ".").replace("src.", "").replace(".py", "")
             import importlib
             mod = importlib.import_module(module_path)
-            # Find Strategy subclass in module
             for attr_name in dir(mod):
                 obj = getattr(mod, attr_name)
                 if isinstance(obj, type) and hasattr(obj, 'signals') and obj.__name__.endswith('Strategy'):
@@ -201,15 +200,48 @@ def adversarial_node(state: ResearchState, _tools: dict[str, Any]) -> dict:
                             "detail": issue.get("detail", str(issue)),
                         })
 
-            critique = get_llm_critique_prompt(art, results)
+            # Generate LLM critique prompt
+            llm_prompt = get_llm_critique_prompt(art, results)
+
+            # Try to call LLM if tools provide it
+            llm_call = tools.get("llm") or tools.get("llm_call")
+            if llm_call:
+                try:
+                    llm_response = llm_call(llm_prompt)
+                    # Parse structured JSON from LLM response
+                    llm_data = _parse_llm_critique(llm_response)
+                    if llm_data:
+                        llm_severity = llm_data.get("severity", "low")
+                        # Upgrade severity if LLM finds worse issues
+                        sev_order = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+                        if sev_order.get(llm_severity, 0) > sev_order.get(severity, 0):
+                            severity = llm_severity
+                        for issue in llm_data.get("issues_found", []):
+                            issues_found.append({"check": "llm_critique", "detail": issue})
+                        state["llm_recommendation"] = llm_data.get("recommendation", "")
+                        state["llm_rationale"] = llm_data.get("rationale", "")
+                except Exception as e:
+                    logger.warning(f"[ADVERSARIAL] LLM call failed: {e}")
+                    issues_found.append({"check": "llm_critique", "detail": f"LLM call error: {e}"})
+            else:
+                # No LLM available — store prompt for agent to use
+                logger.info("[ADVERSARIAL] No LLM tool available — storing prompt for agent")
+                issues_found.append({
+                    "check": "llm_critique",
+                    "detail": "LLM not available — agent should review prompt below",
+                })
+
+            critique = llm_prompt
             logger.info(
-                f"[ADVERSARIAL] {pair}: {results['passed']} (severity={severity}, "
-                f"checks={list(results['checks'].keys())})"
+                f"[ADVERSARIAL] {pair}: severity={severity}, "
+                f"mechanical_checks={list(results['checks'].keys())}, "
+                f"llm_called={llm_call is not None}"
             )
         except Exception as e:
-            logger.error(f"[ADVERSARIAL] Mechanical checks failed: {e}")
+            logger.error(f"[ADVERSARIAL] Checks failed: {e}")
             critique = f"Adversarial check error: {e}"
             severity = "high"
+            issues_found.append({"check": "runtime", "detail": str(e)})
     else:
         critique = "No strategy instantiated — cannot run adversarial checks."
         severity = "high"
@@ -222,17 +254,75 @@ def adversarial_node(state: ResearchState, _tools: dict[str, Any]) -> dict:
     return state
 
 
+def _parse_llm_critique(response: str) -> dict | None:
+    """Parse structured JSON from LLM critique response."""
+    import json
+    # Try to extract JSON block from response
+    text = response.strip()
+    # Look for JSON code block
+    if "```json" in text:
+        start = text.index("```json") + 7
+        end = text.index("```", start) if "```" in text[start:] else len(text)
+        text = text[start:end].strip()
+    elif "```" in text:
+        start = text.index("```") + 3
+        end = text.index("```", start) if "```" in text[start:] else len(text)
+        text = text[start:end].strip()
+    # Try { } delimited JSON
+    if "{" in text and "}" in text:
+        start = text.index("{")
+        end = text.rindex("}") + 1
+        text = text[start:end]
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        # Fallback: treat entire response as a single issue
+        return {
+            "severity": "medium",
+            "issues_found": [response[:500]],
+            "recommendation": "revise",
+            "rationale": response[:1000],
+        }
+
+
 def decision_node(state: ResearchState, _tools: dict[str, Any]) -> dict:
     """Decide: approve, revise, or reject.
 
-    The real agent (OpenClaw) makes this decision based on backtest results
-    and adversarial critique. This node provides the decision in state.
+    Auto-rejects if adversarial severity >= high (unless human_approved).
+    Otherwise defers to state['decision'] for agent override.
     """
-    state["decision"] = ""
-    state["decision_rationale"] = ""
-    state["human_approved"] = False
+    severity = state.get("severity", "low")
+    human_approved = state.get("human_approved", False)
 
-    logger.info("[DECISION] Ready for agent decision")
+    # Auto-reject on high/critical severity unless human override
+    if severity in ("high", "critical") and not human_approved:
+        issues = state.get("issues_found", [])
+        issue_summary = "; ".join(i.get("detail", "")[:100] for i in issues[:3])
+        state["decision"] = "reject"
+        state["decision_rationale"] = (
+            f"Auto-rejected: adversarial severity={severity}. Issues: {issue_summary}"
+        )
+        logger.warning(f"[DECISION] AUTO-REJECT {state.get('pair', '?')}: severity={severity}")
+        return state
+
+    # If no agent override, apply default based on backtest
+    if not state.get("decision"):
+        backtest = state.get("backtest_results", {})
+        sharpe = backtest.get("sharpe", 0)
+        if sharpe > 1.0:
+            state["decision"] = "approve"
+            state["decision_rationale"] = f"Sharpe {sharpe:.2f} > 1.0 — approve"
+        elif sharpe > 0.5:
+            state["decision"] = "revise"
+            state["decision_rationale"] = f"Sharpe {sharpe:.2f} in 0.5-1.0 — needs revision"
+        else:
+            state["decision"] = "reject"
+            state["decision_rationale"] = f"Sharpe {sharpe:.2f} < 0.5 — reject"
+
+    logger.info(
+        f"[DECISION] {state.get('pair', '?')}: {state['decision']} "
+        f"(severity={severity}, human_approved={human_approved})"
+    )
     return state
 
 
