@@ -41,6 +41,9 @@ class HeArbitrageStrategy(Strategy):
         funding = (pl.scan_parquet(str(settings.raw_dir/"funding"/plower/"**"/"*.parquet"))
                    .sort("timestamp_ms").collect())
 
+        spot = spot.filter(pl.col("timestamp_ms").is_not_null())
+        perp = perp.filter(pl.col("timestamp_ms").is_not_null())
+        funding = funding.filter(pl.col("timestamp_ms").is_not_null())
         sts = spot["timestamp_ms"].to_list(); sc = spot["close"].to_list()
         pts = perp["timestamp_ms"].to_list(); pc = perp["close"].to_list()
         fr = funding["funding_rate_pct"].to_list(); fts = funding["timestamp_ms"].to_list()
