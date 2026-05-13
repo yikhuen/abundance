@@ -1,13 +1,12 @@
-"""Honest backtest: all 4 strategies with lookahead-fixed signals, consistent costs, B&H baseline."""
+"""Honest backtest v2: Strategy ABC, fixed costs (one-way fees), B&H baseline."""
 import sys; from pathlib import Path; sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"src"))
-import polars as pl; from datetime import datetime
-from abundance.backtesting.metrics import MetricsCalculator
-from abundance.backtesting.costs import COST_MODEL
+import polars as pl
 from abundance.config.settings import settings
-from abundance.strategies.momentum.grayscale_ma50 import run_strategy as ma50
-from abundance.strategies.ema_crossover import run_strategy as ema20
-from abundance.strategies.donchian_breakout import run_strategy as donchian
-from abundance.strategies.composite.adx_blend import run_strategy as adx_blend
+from abundance.backtesting.metrics import MetricsCalculator
+from abundance.strategies.momentum.grayscale_ma50 import MA50Strategy
+from abundance.strategies.ema_crossover import EMA20Strategy
+from abundance.strategies.donchian_breakout import DonchianStrategy
+from abundance.strategies.composite.adx_blend import ADXBlendStrategy
 
 def bh_metrics(pair: str):
     df = pl.scan_parquet(str(settings.raw_dir/"klines"/f"{pair.lower()}_1d"/"**"/"*.parquet")).sort("timestamp_ms").collect()
@@ -19,23 +18,20 @@ def bh_metrics(pair: str):
     return MetricsCalculator.from_equity_curve(eq_df), (eq[-1]/eq[0]-1)*100
 
 for pair, label in [("BTCUSDT","BTC"),("ETHUSDT","ETH")]:
-    print(f"\n{'='*60}\n{label}USDT")
+    print(f"\n{'='*60}\n{label}USDT  (costs: one-way entry + exit = round-trip)")
     bh_mc,bh_ret=bh_metrics(pair)
-    print(f"  Buy & Hold: Return={bh_ret:,.1f}% Sharpe={bh_mc.sharpe_ratio:.2f} DD={bh_mc.max_drawdown_pct:.1f}%")
+    print(f"  B&H:      Return={bh_ret:>10,.1f}% Sharpe={bh_mc.sharpe_ratio:5.2f} DD={bh_mc.max_drawdown_pct:5.1f}%")
 
-    strategies = [
-        ("MA50", ma50),
-        ("Donchian20", donchian),
-        ("EMA20", ema20),
-        ("ADX-blend", adx_blend),
-    ]
-    for name, fn in strategies:
-        try:
-            eq_df, mc = fn(pair)
-            ret_pct = (eq_df["equity"][-1]/eq_df["equity"][0]-1)*100
-            trades = getattr(mc, 'trades', 0)
-            print(f"  {name:15s}: Return={ret_pct:>10,.1f}% Sharpe={mc.sharpe_ratio:5.2f} "
-                  f"DD={mc.max_drawdown_pct:5.1f}% Trades={trades:4d} "
-                  f"α={(mc.sharpe_ratio-bh_mc.sharpe_ratio):+.2f}")
-        except Exception as e:
-            print(f"  {name:15s}: ERROR — {e}")
+    for name, StratClass, kwargs in [
+        ("MA50",        MA50Strategy,       {}),
+        ("Donchian20",  DonchianStrategy,   {"n": 20}),
+        ("EMA20",       EMA20Strategy,      {}),
+        ("ADX-blend",   ADXBlendStrategy,   {}),
+    ]:
+        s = StratClass(**kwargs)
+        art = s.run(pair)
+        ret_pct = (art.equity_curve["equity"][-1]/art.equity_curve["equity"][0]-1)*100
+        trades = art.metrics.trades
+        alpha = art.metrics.sharpe_ratio - bh_mc.sharpe_ratio
+        print(f"  {name:15s}: Return={ret_pct:>10,.1f}% Sharpe={art.metrics.sharpe_ratio:5.2f} "
+              f"DD={art.metrics.max_drawdown_pct:5.1f}% Trades={trades:4d} α={alpha:+.2f}")

@@ -153,16 +153,72 @@ def backtest_node(state: ResearchState, _tools: dict[str, Any]) -> dict:
 
 
 def adversarial_node(state: ResearchState, _tools: dict[str, Any]) -> dict:
-    """Critique the strategy for failure modes.
+    """Run mechanical adversarial checks + provide LLM critique prompt.
 
-    The real agent (OpenClaw) should generate a thorough critique.
-    This node provides structure; the agent fills critique text.
+    Mechanical checks: lookahead, signal sanity, walk-forward, parameter sensitivity.
+    LLM prompt: structured red-team checklist for narrative/economic review.
+
+    If severity >= medium, strategy is auto-rejected unless overridden.
     """
-    state["critique"] = ""
-    state["issues_found"] = []
-    state["severity"] = "low"
+    pair = state.get("pair", "BTCUSDT")
+    strategy_file = state.get("strategy_file", "")
 
-    logger.info("[ADVERSARIAL] Ready for agent critique")
+    # Try to instantiate strategy from state
+    strategy = None
+    if strategy_file:
+        try:
+            module_path = strategy_file.replace("/", ".").replace("src.", "").replace(".py", "")
+            import importlib
+            mod = importlib.import_module(module_path)
+            # Find Strategy subclass in module
+            for attr_name in dir(mod):
+                obj = getattr(mod, attr_name)
+                if isinstance(obj, type) and hasattr(obj, 'signals') and obj.__name__.endswith('Strategy'):
+                    strategy = obj()
+                    break
+        except Exception as e:
+            logger.warning(f"[ADVERSARIAL] Cannot instantiate strategy: {e}")
+
+    critique = ""
+    issues_found = []
+    severity = "low"
+
+    if strategy is not None:
+        try:
+            from abundance.deployment.adversarial import (
+                run_full_adversarial,
+                get_llm_critique_prompt,
+            )
+            art = strategy.run(pair)
+            results = run_full_adversarial(strategy, pair)
+            severity = results.get("severity", "low")
+
+            for check_name, check_data in results.get("checks", {}).items():
+                if not check_data.get("passed", True):
+                    for issue in check_data.get("issues", []):
+                        issues_found.append({
+                            "check": check_name,
+                            "detail": issue.get("detail", str(issue)),
+                        })
+
+            critique = get_llm_critique_prompt(art, results)
+            logger.info(
+                f"[ADVERSARIAL] {pair}: {results['passed']} (severity={severity}, "
+                f"checks={list(results['checks'].keys())})"
+            )
+        except Exception as e:
+            logger.error(f"[ADVERSARIAL] Mechanical checks failed: {e}")
+            critique = f"Adversarial check error: {e}"
+            severity = "high"
+    else:
+        critique = "No strategy instantiated — cannot run adversarial checks."
+        severity = "high"
+        issues_found.append({"check": "instantiation", "detail": "Strategy class not found"})
+
+    state["critique"] = critique
+    state["issues_found"] = issues_found
+    state["severity"] = severity
+
     return state
 
 
